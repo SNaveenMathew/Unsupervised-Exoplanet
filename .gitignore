@@ -3,3 +3,5 @@ data/*.tbl
 .Rhistory
 *.tbl
 *.txt
+Papers/*
+lstm-synthetic-wave-anomaly-detect.py
