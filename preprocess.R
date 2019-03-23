@@ -2,6 +2,11 @@ library(readr)
 library(imputeTS)
 
 files <- list.files(path = "data/", pattern = "*.tbl", full.names = T)
+system("sh counts.sh")
+text <- system("sh counts_df.sh", intern = T)
+text <- t(sapply(strsplit(text, "\t"), function(elem) c(elem[1], elem[2])))
+text <- data.frame(text)
+text$X2 <- as.numeric(text$X2)
 
 for(file in files) {
   temp <- data.frame(read_delim(file, delim = " ", skip = 35, col_names = F),
