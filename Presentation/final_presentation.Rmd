@@ -43,20 +43,23 @@ img <- readPNG("flow.png")
 grid.raster(img)
 ```
 
-## Results 1: Learning
+<font size="2">
 
-```{r warning=F, fig.align='center', fig.width=7.5, fig.height=4}
-img <- readPNG("kplr001026957_q1_q16_tce_01_dvt_lc.tbl_learning.png")
+**LSTM autoencoder hyperparameters:**
+
+- Train-validation-test: 42%, 28%, 30%
+- Sequence length = 10
+- Layers: input (9, 1), LSTM (64), droupout (0.2), LSTM (256), droupout (0.2), LSTM (100), droupout (0.2), dense (9, 1)
+- Loss: Mean square error
+
+</font>
+
+## Results: Learning and Testing
+
+```{r warning=F, fig.align='center', fig.width=10, fig.height=4.5}
+img <- readPNG("test_examples.png")
 grid.raster(img)
 ```
-
-## Results 2: Testing
-
-```{r warning=F, fig.align='center', fig.width=5, fig.height=5}
-img <- readPNG("test_example.png")
-grid.raster(img)
-```
-
 
 ## Scope for Improvement
 
