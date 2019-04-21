@@ -49,7 +49,11 @@ rand_idx <- sample(x = 1:length(files), size = length(files), replace = F)
 files <- files[rand_idx]
 out_files <- out_files[rand_idx]
 
-for(i in 1:length(files)) {
+tm <- Sys.time()
+i <- 1
+run_hrs <- 3
+diff_time <- 0
+while(i <= length(files) & diff_time < 3600 * run_hrs) {
   file <- files[i]
   temp <- data.frame(read_delim(file, delim = " ", skip = 35, col_names = F),
                      stringsAsFactors = F)
@@ -59,7 +63,9 @@ for(i in 1:length(files)) {
   cols <- strsplit(cols, "\\ {0,}\\|")[[1]][-c(1)]
   colnames(temp) <- cols
   wave <- temp$RESIDUAL_FLUX
-  wave <- na.interpolation(wave)
+  wave <- na.interpolation(wave, option = "stine")
+  perc_97.5 <- quantile(wave, 0.975)
+  wave[wave > perc_97.5] <- perc_97.5
   train_len <- as.integer(train_ratio * length(wave))
   train_dat <- wave[1:train_len]
   test_dat <- wave[(train_len + 1):length(wave)]
@@ -94,11 +100,22 @@ for(i in 1:length(files)) {
   )
   png(paste0("plots/learning_curve/", out_files[i], "_learning.png"),
       width = 1366, height = 768)
-  plot(his)
+  print(plot(his))
   dev.off()
   y_test_pred <- predict(model, x_test)
   save_plot(y_pred = y_test_pred, y = y_test,
             out_file = paste0("plots/test_pred_plot/", out_files[i],
                               "_test_plot.png"))
   y_train_pred <- predict(model, x_train)
+  tm1 <- Sys.time()
+  i <- i + 1
+  diff_time <- as.double.difftime(tm1 - tm, units = "secs")
 }
+
+png("Presentation/example.png")
+plot(wave)
+abline(h = lns1, col = "red")
+abline(h = lns2, col = "green")
+abline(h = lns3, col = "blue")
+legend("topright", legend = c("1 * std", "2 * std", "3 * std"), fill = c("red", "green", "blue"))
+dev.off()
