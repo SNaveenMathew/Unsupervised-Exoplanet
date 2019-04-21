@@ -3,6 +3,32 @@ library(imputeTS)
 library(reticulate)
 reticulate::use_condaenv("tf_gpu")
 library(keras)
+library(kerasR)
+library(imputeTS)
+
+set.seed(1)
+save_plot <- function(y_pred, y, out_file) {
+  sqr_error <- (y_pred - y)^2
+  avg_error <- mean(sqr_error)
+  sd_error <- sd(sqr_error)
+  idx <- sqr_error > avg_error + 2 * sd_error
+  png(out_file, width = 1366, height = 768)
+  plot(y_test, col = idx + 1)
+  dev.off()
+}
+
+seq_len <- 10
+train_ratio <- 0.7
+batch_size <- 50
+epochs <- 10
+shp <- c(seq_len - 1, 1)
+
+reduceLr <- callback_reduce_lr_on_plateau(
+  monitor = "val_loss", factor = sqrt(0.1),
+  patience = 2)
+# Early stopping is not working for some reason
+# earlyStopping <- EarlyStopping(monitor = "val_acc", min_delta = -0.001,
+#                                patience = 2)
 
 files <- list.files(path = "data/", pattern = "*.tbl", full.names = T)
 system("sh counts.sh")
@@ -10,8 +36,21 @@ text <- system("sh counts_df.sh", intern = T)
 text <- t(sapply(strsplit(text, "\t"), function(elem) c(elem[1], elem[2])))
 text <- data.frame(text)
 text$X2 <- as.numeric(text$X2)
+out_files <- sapply(strsplit(files, "/"), function(strs) strs[length(strs)])
+out_files <- sapply(strsplit(out_files, "\\."), function(strs) strs[1])
+dir.create("plots", showWarnings = F)
+setwd("plots")
+dir.create("learning_curve", showWarnings = F)
+dir.create("test_pred_plot", showWarnings = F)
+setwd("../")
 
-for(file in files) {
+# Randomizing the input files
+rand_idx <- sample(x = 1:length(files), size = length(files), replace = F)
+files <- files[rand_idx]
+out_files <- out_files[rand_idx]
+
+for(i in 1:length(files)) {
+  file <- files[i]
   temp <- data.frame(read_delim(file, delim = " ", skip = 35, col_names = F),
                      stringsAsFactors = F)
   temp$X8 <- NULL
@@ -19,4 +58,47 @@ for(file in files) {
   cols <- read_lines(file, skip = 31, n_max = 1)
   cols <- strsplit(cols, "\\ {0,}\\|")[[1]][-c(1)]
   colnames(temp) <- cols
+  wave <- temp$RESIDUAL_FLUX
+  wave <- na.interpolation(wave)
+  train_len <- as.integer(train_ratio * length(wave))
+  train_dat <- wave[1:train_len]
+  test_dat <- wave[(train_len + 1):length(wave)]
+  train_arr <- t(sapply(1:(length(train_dat) - seq_len + 1),
+                        function(i) return(train_dat[i:(i + seq_len - 1)])))
+  test_arr <- t(sapply(1:(length(test_dat) - seq_len + 1),
+                       function(i) return(test_dat[i:(i + seq_len - 1)])))
+  x_train <- train_arr[, -ncol(train_arr)]
+  x_train <- array_reshape(x_train, dim = c(dim(x_train), 1))
+  y_train <- train_arr[, ncol(train_arr)]
+  x_test <- test_arr[, -ncol(test_arr)]
+  x_test <- array_reshape(x_test, dim = c(dim(x_test), 1))
+  y_test <- test_arr[, ncol(test_arr)]
+  
+  model <- keras_model_sequential() %>%
+    layer_lstm(input_shape = shp, units = 64, return_sequences = T) %>%
+    layer_dropout(0.2) %>%
+    layer_lstm(256, return_sequences = T) %>%
+    layer_dropout(0.2) %>%
+    layer_lstm(100, return_sequences = T) %>%
+    layer_dropout(0.2) %>%
+    layer_flatten() %>%
+    layer_dense(units = 1, activation = "linear")
+  model %>% compile(loss = "mse", optimizer = optimizer_adam(lr = 0.1),
+                    metrics = c("mape", "mae"))
+  his <- model %>% fit(
+    x_train, y_train,
+    batch_size = batch_size,
+    epochs = epochs,
+    callbacks = list(reduceLr),
+    validation_split = 0.3
+  )
+  png(paste0("plots/learning_curve/", out_files[i], "_learning.png"),
+      width = 1366, height = 768)
+  plot(his)
+  dev.off()
+  y_test_pred <- predict(model, x_test)
+  save_plot(y_pred = y_test_pred, y = y_test,
+            out_file = paste0("plots/test_pred_plot/", out_files[i],
+                              "_test_plot.png"))
+  y_train_pred <- predict(model, x_train)
 }
