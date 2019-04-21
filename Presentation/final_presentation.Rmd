@@ -1,0 +1,64 @@
+---
+title: "Exoplanet Detection Using Machine Learning"
+author: "Naveen Mathew Nathan S."
+date: "April 21, 2019"
+output:
+  ioslides_presentation:
+    widescreen: true
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+## Introduction
+
+`Transit method` is used to detect the presence of exoplanets around distant stars. Here's a helpful visualization:
+
+![](transitgif2.gif)
+
+## Data
+
+<font size="3">
+
+- Data was obtained from the Kepler space telescope. Data format: time series (equal intervals) with some missing data
+- Only the light flux was used.
+- Data is not as clean as expected.
+    - Universe is large - stars exhibit variable brightness at large distances due to several phenomenon.
+    - Not all crests and troughs are relevant.
+
+</font>
+
+```{r fig.width=3.5, fig.height=3.5, fig.align='center'}
+library(png)
+library(grid)
+img <- readPNG("example.png")
+grid.raster(img)
+```
+
+## Components
+
+```{r warning=F, fig.align='center', fig.width=7.5, fig.height=4}
+img <- readPNG("flow.png")
+grid.raster(img)
+```
+
+## Results 1: Learning
+
+```{r warning=F, fig.align='center', fig.width=7.5, fig.height=4}
+img <- readPNG("kplr001026957_q1_q16_tce_01_dvt_lc.tbl_learning.png")
+grid.raster(img)
+```
+
+## Results 2: Testing
+
+```{r warning=F, fig.align='center', fig.width=5, fig.height=5}
+img <- readPNG("test_example.png")
+grid.raster(img)
+```
+
+
+## Scope for Improvement
+
+- Hyperparameters such as sequence length, number of hidden units in LSTM layers, number of dense layers, number of neurons in dense layer, etc. can be tuned.
+- An algorithm can be used to perform phase folding to identify number of planets and period of revolution of each planet around the star. This will also enrich the data.
