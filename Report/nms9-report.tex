@@ -78,7 +78,7 @@ These efforts all involve supervised machine learning. They incorporate human bi
 
 Kepler contains several forms of light curve data. For this project Kepler KOI DV data set was chosen. The expected size was around 100 GB. Only a 25 GB subset was downloaded for convenience. The downloaded data contains 3051 files. Each file consists of time series and covers Q1-Q16.
 
-The downloaded data set contains 2205 stars. Each star has at least one orbiting planet. Distribution of number of planets around the stars is given below:
+The downloaded files contain data from 2205 stars. Each star has at least one orbiting planet. Distribution of number of planets around the stars is given below:
 
 \begin{center}
  \begin{tabular}{| c | c |} 
@@ -187,7 +187,7 @@ If we model the distribution of flux based on a series of finite number of previ
 
 \subsection{Autoencoder}
 
-An autoencoder is used to model the (joint) distribution of one or more variables. It consists of an encoder and a decoder. The encoder propagates information from the input to a 'bottleneck'. The decoder reconstructs the original variable(s) from the information passed to the bottleneck.
+An autoencoder is used to model the (joint) distribution of one or more variables. An autoencoder attempts to reconstruct the original signal from the input by passing it through information bottleneck. The amount of details retained in the representation on input at the bottleneck depends on the number of units in the bottleneck. If the structure of the network is fixed from the input to bottleneck, the reconstruction error at the output cannot be decreased below a minimum threshold that is determined by the amount of information at the bottleneck.
 
 \subsection{LSTM}
 
@@ -218,39 +218,81 @@ There are several tunable hyperparameters in the model. We use the following com
   \item Activation(s) of dense layer(s): Linear.
   \item Loss function: Mean squared error.
   \item Optimization scheme: Adam (learning rate = 0.1).
+  \item Batch size: 50
+  \item Number of epochs: 10
 \end{itemize}
 
-\section{Results and Conclusions}
+\subsection{Learning}
 
-It can be improved drastically with supervised learning.
+The process of learning starts with random initializations of the weights in recurrent and dense layers. A mini batch of size 50 was used to compute the estimate of MSE and its gradient with respect to the parameters. The overall training was run for 10 epochs because the interpreter was unable to perform early stopping based on validation loss. Adam optimization scheme was used to find the minimizer. An example learning curve can be found below:
+
+\begin{figure}[h!]
+	\includegraphics[width=\linewidth]{learning.png}
+	\caption{Learning Curve.}
+	\label{fig:learning}
+\end{figure}
+
+Based on the learning curves obtained from the 34 files we conclude that the process of learning has occurred reasonably well in 10 epochs. Almost all fits show that the training loss, MAE and MAPE are close to the validation loss, APE and MAPE respectively. Therefore, the fitted models are appropriate for prediction.
+
+\section{Results and Conclusions}
 
 \begin{center}
  \begin{tabular}{|c | c | c | c |} 
  \hline
- \textbf{Dataset} & \textbf{Model}& \textbf{Metric} & \textbf{Value} \\ [0.5 ex]
+ \textbf{Dataset} & \textbf{Metric} & \textbf{Value - Train} & \textbf{Value - Validation} \\ [0.5 ex]
  \hline
- file1 & Logistic Regression & AUC & 0.504 \\ 
+ 003732821 & Loss & $2.310446 \times 10^{-7}$ & $2.312617 \times 10^{-7}$ \\ 
  \hline
- file2 & Logistic Regression & Accuracy & 0.535 \\
+ 003732821 & MAPE & 118.83902 & 125.8919 \\
  \hline
- file3 & Random Forest & AUC & 0.797 \\
+ 003732821 & MAE & $3.867701 \times 10^{-4}$ & $3.769676 \times 10^{-4}$ \\
  \hline
- file4 & Random Forest & Accuracy & 0.73 \\
+ 010790387 & Loss & $1.509265 \times 10^{-7}$ & $1.466977 \times 10^{-7}$ \\ 
  \hline
- file5 & Stacked Ensemble & AUC & 0.881 \\
+ 010790387 & MAPE & 230.77675 & 121.3132 \\
  \hline
- file6 & Stacked Ensemble & AUC & 0.881 \\
+ 010790387 & MAE & $3.075688 \times 10^{-4}$ & $3.081162 \times 10^{-4}$ \\
  \hline
- file7 & Stacked Ensemble & AUC & 0.881 \\
+ 010879213 & Loss & $9.718002 \times 10^{-6}$ & $7.469951 \times 10^{-4}$ \\ 
  \hline
- file8 & Stacked Ensemble & AUC & 0.881 \\
+ 010879213 & MAPE & 38.79628 & 403.0349 \\
  \hline
- file9 & Stacked Ensemble & AUC & 0.881 \\
+ 010879213 & MAE & $2.484605 \times 10^{-3}$ & $2.00089626 \times 10^{-2}$ \\
  \hline
- file10 & Stacked Ensemble & Accuracy & 0.779 \\ [1ex] 
+ 010155029 & Loss & $6.862203 \times 10^{-8}$ & $3.177653 \times 10^{-8}$ \\ 
+ \hline
+ 010155029 & MAPE & 198.06549 & 138.9201 \\
+ \hline
+ 010155029 & MAE & $9.513334 \times 10^{-5}$ & $1.398749 \times 10^{-4}$ \\
+ \hline
+ 001995732 & Loss & $8.851227 \times 10^{-7}$ & $8.462837 \times 10^{-7}$ \\ 
+ \hline
+ 001995732 & MAPE & 210.76816 & 141.6288 \\
+ \hline
+ 001995732 & MAE & $7.366635 \times 10^{-4}$ & $7.207151 \times 10^{-4}$ \\[1ex] 
  \hline
 \end{tabular}
 \end{center}
+
+\subsection{Plots}
+
+\begin{figure}[h!]
+	\includegraphics[width=\linewidth]{loss.png}
+	\caption{Loss Comparison.}
+	\label{fig:loss}
+\end{figure}
+
+\begin{figure}[h!]
+	\includegraphics[width=\linewidth]{mae.png}
+	\caption{MAE Comparison.}
+	\label{fig:mae}
+\end{figure}
+
+\begin{figure}[h!]
+	\includegraphics[width=\linewidth]{mape.png}
+	\caption{MAPE Comparison.}
+	\label{fig:mape}
+\end{figure}
 
 \section{Scope for Improvement}
 
@@ -283,27 +325,13 @@ Lastly, the papers that used supervised learning tried to identify the period of
 Kepler KOI DV bulk data downloader \footnote{Link: https://exoplanetarchive.ipac.caltech.edu/bulk\_data\_download/\\Kepler\_KOI\_DV\_wget.bat}
 
 \item References \\
-A box-fitting algorithm in the search for periodic transits (Kovács et al., 2002)\\
-Identifying Exoplanets with Deep Learning: A Five Planet Resonant Chain around Kepler-80 and an Eighth Planet around Kepler-90 (Christopher J. Shallue and Andrew Vanderburg, 2018)\\
-Machine-learning Approaches to Exoplanet Transit Detection and Candidate Validation in Wide-field Ground-based Surveys (Schanche et al., 2018)
+\begin{itemize}
+\item A box-fitting algorithm in the search for periodic transits (Kovács et al., 2002)
+\item Identifying Exoplanets with Deep Learning: A Five Planet Resonant Chain around Kepler-80 and an Eighth Planet around Kepler-90 (Christopher J. Shallue and Andrew Vanderburg, 2018)
+\item Machine-learning Approaches to Exoplanet Transit Detection and Candidate Validation in Wide-field Ground-based Surveys (Schanche et al., 2018)
+\end{itemize}
 
 \end{itemize}
 
 
 \end{document}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

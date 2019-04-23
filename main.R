@@ -1,3 +1,5 @@
+# Note: Keras uses multiple cores. Therefore multiprocessing is not used
+
 library(readr)
 library(imputeTS)
 library(reticulate)
@@ -5,6 +7,7 @@ reticulate::use_condaenv("tf_gpu")
 library(keras)
 library(kerasR)
 library(imputeTS)
+library(reshape2)
 
 set.seed(1)
 save_plot <- function(y_pred, y, out_file) {
@@ -120,10 +123,36 @@ while(i <= length(files) & diff_time < 3600 * run_hrs) {
     val_mae = his$metrics$val_mean_absolute_error[10]))
 }
 
+metrics_df$file <- files[1:(i - 1)]
+
 png("Presentation/example.png")
 plot(wave)
 abline(h = lns1, col = "red")
 abline(h = lns2, col = "green")
 abline(h = lns3, col = "blue")
-legend("topright", legend = c("1 * std", "2 * std", "3 * std"), fill = c("red", "green", "blue"))
+legend("topright", legend = c("1 * std", "2 * std", "3 * std"),
+       fill = c("red", "green", "blue"))
+dev.off()
+
+met_df <- melt(data = metrics_df, id = "file")
+png("Report/loss.png", width = 554, height = 412)
+loss_df <- met_df[grep(met_df$variable, pattern =  ".*_loss$"), ]
+with(loss_df,
+     plot(x = as.integer(factor(file)), y = value, col = variable, pch = 20,
+          xlab = "File", xaxt = 'n'))
+legend("topright", legend = unique(loss_df$variable), fill = unique(loss_df$variable))
+dev.off()
+png("Report/mae.png", width = 554, height = 412)
+mae_df <- met_df[grep(met_df$variable, pattern =  ".*_mae$"), ]
+with(mae_df,
+     plot(x = as.integer(factor(file)), y = value, col = variable, pch = 20,
+          xlab = "File", xaxt = 'n'))
+legend("topright", legend = unique(mae_df$variable), fill = unique(mae_df$variable))
+dev.off()
+png("Report/mape.png", width = 554, height = 412)
+mape_df <- met_df[grep(met_df$variable, pattern =  ".*_mape$"), ]
+with(mape_df,
+     plot(x = as.integer(factor(file)), y = value, col = variable, pch = 20,
+          xlab = "File", xaxt = 'n'))
+legend("topright", legend = unique(mape_df$variable), fill = unique(mape_df$variable))
 dev.off()
