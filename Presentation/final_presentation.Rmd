@@ -64,4 +64,5 @@ grid.raster(img)
 ## Scope for Improvement
 
 - Hyperparameters such as sequence length, number of hidden units in LSTM layers, number of dense layers, number of neurons in dense layer, etc. can be tuned.
+- Bi-directional LSTM autoencoder can be used instead of directional LSTM autoencoder.
 - An algorithm can be used to perform phase folding to identify number of planets and period of revolution of each planet around the star. This will also enrich the data.

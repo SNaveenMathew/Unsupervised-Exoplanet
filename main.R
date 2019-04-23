@@ -10,8 +10,8 @@ set.seed(1)
 save_plot <- function(y_pred, y, out_file) {
   sqr_error <- (y_pred - y)^2
   avg_error <- mean(sqr_error)
-  sd_error <- sd(sqr_error)
-  idx <- sqr_error > avg_error + 2 * sd_error
+  std_error <- sd(sqr_error)
+  idx <- sqr_error > (avg_error + 2 * std_error)
   png(out_file, width = 1366, height = 768)
   plot(y_test, col = idx + 1)
   dev.off()
@@ -53,6 +53,7 @@ tm <- Sys.time()
 i <- 1
 run_hrs <- 3
 diff_time <- 0
+metrics_df <- data.frame()
 while(i <= length(files) & diff_time < 3600 * run_hrs) {
   file <- files[i]
   temp <- data.frame(read_delim(file, delim = " ", skip = 35, col_names = F),
@@ -110,6 +111,13 @@ while(i <= length(files) & diff_time < 3600 * run_hrs) {
   tm1 <- Sys.time()
   i <- i + 1
   diff_time <- as.double.difftime(tm1 - tm, units = "secs")
+  metrics_df <- rbind(metrics_df, data.frame(
+    train_loss = his$metrics$loss[10],
+    train_mape = his$metrics$mean_absolute_percentage_error[10],
+    train_mae = his$metrics$mean_absolute_error[10],
+    val_loss = his$metrics$val_loss[10],
+    val_mape = his$metrics$val_mean_absolute_percentage_error[10],
+    val_mae = his$metrics$val_mean_absolute_error[10]))
 }
 
 png("Presentation/example.png")

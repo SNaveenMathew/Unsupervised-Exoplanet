@@ -53,117 +53,240 @@ reprint,%
 \date{\today}
 
 \begin{abstract}
-Exoplanet detection using transit method is currently a manual process. It involves identification of clear troughs in the intensity of light for a sustained period. 
+Exoplanet detection using transit method is currently a manual process. It involves identification of clear troughs in the intensity of light for a sustained period. Previous works have tried to automate the process using BLS (Box-fitting Least Squares) and TLS (Transit Least Squares). Supervised machine learning algorithms such as CNN, wavelet MLP, SVM and Bayesian MCMC have been applied with varying levels of success. The objective of this paper is not to improve on these methods, but to open doors for unsupervised methods in exoplanet detection. The report concludes with examples of true positives and false positives and mentions ways to improve the performance.
 \end{abstract}
 
 \maketitle
 
 \section{Introduction}
 
-Give some introduction
+The first exoplanet was discoveed in 1995. The rate of discovery of exoplanets has increased over the years. Kepler was the first space telescope that scanned for exoplanets. Nowadays there are other telescopes such as KELT, HATNet, CoRoT, TESS (future), Plato (future) and LSST (future). As a result, manual identification becomes tedious. The required manpower is often not available to perform this task.
+
+Several attempts were made to automate the process of detecting troughs in light curve. These include methods that use classical statistics, time series analysis. Recently several machine learning solutions have been used and have shown promising results. All available solutions are supervised. Therefore, they tend to exhibit the same biases as humans. We will explore an unsupervised method for exoplanet identification using light curves which is expected to involve fewer human biases. Specifically, we will employ LSTM autoencoder to compress the available information and to identify anomalous patterns - such as eclipsing binary stars or exoplanets.
 
 \section{Literature Survey}
 
-Talk about paper which uses CNN, which is supervised learning. Also talk about classical methods: BLS, TLS.
+Various statistical learning algorithms have been applied to the problem of exoplanet detection using transit method. BLS (Box-fitting Least Squares) described by Kovacs et al. (2016). The algorithm searches for signals characterized by a periodic alternation between two discrete levels, with much less time spent at the lower level. They apply several transormations on the data to compute useful metrics. Firstly they compute Signal Detection Efficiency: $SDE = \frac{SR_{peak}-<SR>}{sd(SR)}$ and use $\alpha = \frac{\delta}{\sigma}\sqrt{nq}$ to parameterize the effective SNR (signal-to-noise ratio). They performed several simulations and observed that the model performed better than previous works even at low SNR.
+
+Pearson et al. (2017) discussed the use of neural networks for exoplanet detection using light curves. They setup the task as a supervised binary classification problem and used methods such as MLP, wavelet MLP, SVM and CNN to model the light curve. They observed that wavelet MLP and CNN had similar ROC curves, but CNN led to better separation as it had lower loss function value after training. They also observed that CNN performs significantly better than other algorithms at low resolutions and that the difference decreases with increase in resolution. They also found that the performance improved after phase folding.
+
+Christopher et al. (2018) applied logistic regression, fully connected feed forward network and CNN with pooling on human tagged transit data to predict planetary transits from light curves. They applied different types of data augmentation to create artificial data from manually labelled observations. They also used three different inputs - global, local and both - to classify the light curve image. Google Vizier was used for hyperparemeter tuning. Finally, the models were averaged to reduce the error rate. Using this method they were able to identify 2 new candidates that were later confirmed as exoplanets.
+
+These efforts all involve supervised machine learning. They incorporate human biases in the output variable. Therefore, the patterns they learn contain human biases. The objective of this project is to use anomaly detection to flag different types of patterns - not limited to planetary transits.
 
 \section{Data Description}
 
-Describe Kepler data
+Kepler contains several forms of light curve data. For this project Kepler KOI DV data set was chosen. The expected size was around 100 GB. Only a 25 GB subset was downloaded for convenience. The downloaded data contains 3051 files. Each file consists of time series and covers Q1-Q16.
+
+The downloaded data set contains 2205 stars. Each star has at least one orbiting planet. Distribution of number of planets around the stars is given below:
+
+\begin{center}
+ \begin{tabular}{| c | c |} 
+ \hline
+ \textbf{Number of Planets} & \textbf{Count of Stars}\\ [0.5 ex]
+ \hline
+ 1 & 1595 \\ 
+ \hline
+ 2 & 454 \\
+ \hline
+ 3 & 105 \\
+ \hline
+ 4 & 33 \\
+ \hline
+ 5 & 11 \\
+ \hline
+ 6 & 5 \\
+ \hline
+ 7 & 1 \\
+ \hline
+ 8 & 1 \\
+ \hline
+ \textbf{Total} & \textbf{2205} \\ [1ex] 
+ \hline
+\end{tabular}
+\end{center}
+
+
+\subsection{Variables}
+
+Data description provided in Kepler page \footnote{Link: https://exoplanetarchive.ipac.caltech.edu/docs/KeplerDV.html}:
 
 \begin{itemize}
-	\item Variable: Description.
-	\item Next variable: Next description.
+  \item TIME: Time in seconds after Barycentric Kepler Julian Date (BKJD = BJD - 2454833).
+  \item CADENCE\_NUMBER: A measure of (time) resolution of observations.
+  \item INIT\_FLUX\_PL: Unfilled, normalized, harmonic-removed input to planet search algorithm for this TCE. Previously identified TCEs have been gapped.
+  \item INIT\_FLUX\_PL\_ERR: Uncertainty in the initial flux.
+  \item MODEL\_LC\_PL: Filled, normalized model light curve calculated from the planetary fit to the TCE.
+  \item RESIDUAL\_FLUX: INIT\_FLUX\_LAST\_PLANET with model transits gapped – median(INIT\_FLUX\_LAST\_PLANET with model transits gapped).
+  \item RESIDUAL\_FLUX\_ERR: Uncertainty in the residual flux.
 \end{itemize}
 
 \section{Exploratory Analysis}
 
-Speak about number of files, number of stars, number of planets, summary of number of planets around each star. Data is noisy. Talk about median subtraction. Talk about missing data. Add plot
+Summary statistics of the number of planets around each star:
+
+\begin{center}
+ \begin{tabular}{| c | c |} 
+ \hline
+ \textbf{Statistic} & \textbf{Value}\\ [0.5 ex]
+ \hline
+ Mean & 1.383 \\ 
+ \hline
+ Median & 1 \\
+ \hline
+ Mode & 1 \\
+ \hline
+ Standard deviation & 0.748 \\
+ \hline
+ Range & [1, 8] \\
+ \hline
+ Q1 & 1 \\
+ \hline
+ Q3 & 2 \\ [1ex] 
+ \hline
+ \end{tabular}
+\end{center}
+
+For simplicity, we will consider only RESIDUAL\_FLUX column for our analysis. The residual flux column comprises of the following components:
+
+\begin{itemize}
+  \item Trend in mean brightness of host star.
+  \item Changes in brightness due to orbiting planets, asteroids, comets and debris.
+\end{itemize}
+
+Speak about number of files, number of stars, number of planets, summary of number of planets around each star. Data is noisy.
+
+Since the median was subtracted, for a non-variable star, the residual flux is almost a pure Gaussian noise with constant variance. However, in presence of a planetary transit, the light curve shows significant deviation from the noisy process. Therefore, the joint multivariate distribution of consecutive observations is expected to shift significantly in presence of exoplanets.
+
 
 \begin{figure}[h!]
 	\includegraphics[width=\linewidth]{example.png}
 	\caption{Residual Flux vs Time.}
-	\label{fig:finaldf}
+	\label{fig:res_flux}
 \end{figure}
 
-Summarize few findings
+Based on these observations, it is not possible to analyze the flux as a simple stationary Gaussian noise without a processes that drives the variation in flux. Thresholds such as $mean \pm 3 \times stdev$ will lead to large number of false positives.
 
 \section{Preprocessing}
 
-Talk about capping, time series interpolation for filling missing values.
-
 \subsection{Capping}
 
-Something
+From the above plot we observe that the flux shows unusual variations above the 3 standard deviation mark. This can be because of several reasons such as increase in intensity of the star over time or due to environmental factors that inflence the noise. To minimize the effect of this noise, we cap the values of residual flux at 97.5 percentile. However, systematic variations that lead to increased flux will lead to significant difference in representation at the bottleneck layer.
 
 \subsection{Imputing Missing Values}
 
-Something
+The data is in time series format with missing values. Training a network is not possible in presence of missing values. Since the missing values are clustered together, the process of imputing values becomes difficult. A method called Stineman interpolation was used to fill the missing values of residual flux. This smooths the residual flux during the missing period.
 
 \section{Modeling}
 
-Why did you choose the model?
+Under the assumption of stationarity, the expected proportion of observations outside $mean \pm 3 \times stdev$ is 0.0027. However, despite the near normality of the distribution, the observed proportion is much higher. In such cases it is uncertain whether there are orbiting planets or debris around the host star. Humans can detect orbiting exoplanets only when there is a significant shift in the light curve.
+
+$$\mu_{seqlen} = f(\mu_{seqlen-1,seqlen-2, ...}) + \epsilon; \epsilon \sim N(0, \sigma^2)$$
+
+If we model the distribution of flux based on a series of finite number of previous values of flux, under the assumption of normality of flux, the squared error is expected to have a chi-square distribution. However, any shift in light curve will be characterized by a high value of squared reconstruction error.
+
+\subsection{Autoencoder}
+
+An autoencoder is used to model the (joint) distribution of one or more variables. It consists of an encoder and a decoder. The encoder propagates information from the input to a 'bottleneck'. The decoder reconstructs the original variable(s) from the information passed to the bottleneck.
+
+\subsection{LSTM}
+
+Several models of memory have been proposed in the past. These models explicitly use finite (such as Markov model) or infinite number (such as exponential weights) of past states as memory. Long short term memory (LSTM) were proposed to model memory in neural networks. LSTM autoencoders have been applied successfully in industrial IoT for anomaly detection in time series data. This makes them suitable for anomaly detection in light curves.
+
+\begin{figure}[h!]
+	\includegraphics[width=\linewidth]{LSTM-Autoencoder-Model.png}
+	\caption{Standard LSTM Autoencoder.}
+	\label{fig:lstm_autoenc}
+\end{figure}
 
 \subsection{Hyper-Parameters}
 
-Some hyperparameters
+There are several tunable hyperparameters in the model. We use the following combination:
+
+\begin{itemize}
+  \item Sequence length: 10.
+  \item Number of LSTM layer(s): 3.
+  \item LSTM activation(s):
+  \begin{itemize}
+      \item Activation: tanh.
+      \item Recurrent activation: hard sigmoid.
+  \end{itemize}
+  \item Number of units in each LSTM layer(s): 64, 256, 100.
+  \item Recurrent droupout: 0.2, 0.2, 0.2.
+  \item Number of dense layer(s): 1.
+  \item Number of units in dense layer(s): 1.
+  \item Activation(s) of dense layer(s): Linear.
+  \item Loss function: Mean squared error.
+  \item Optimization scheme: Adam (learning rate = 0.1).
+\end{itemize}
 
 \section{Results and Conclusions}
 
-Show some good and bad examples. Mention how the results can be improved. Remember, this is completely unsupervised! It can be improved drastically with supervised learning.
+It can be improved drastically with supervised learning.
 
 \begin{center}
  \begin{tabular}{|c | c | c | c |} 
  \hline
  \textbf{Dataset} & \textbf{Model}& \textbf{Metric} & \textbf{Value} \\ [0.5 ex]
  \hline
- Test & Logistic Regression & AUC & 0.504 \\ 
+ file1 & Logistic Regression & AUC & 0.504 \\ 
  \hline
- Test & Logistic Regression & Accuracy & 0.535 \\
+ file2 & Logistic Regression & Accuracy & 0.535 \\
  \hline
- Test & Random Forest & AUC & 0.797 \\
+ file3 & Random Forest & AUC & 0.797 \\
  \hline
- Test & Random Forest & Accuracy & 0.73 \\
+ file4 & Random Forest & Accuracy & 0.73 \\
  \hline
- Test & Stacked Ensemble & AUC & 0.881 \\
+ file5 & Stacked Ensemble & AUC & 0.881 \\
  \hline
- Test & Stacked Ensemble & Accuracy & 0.779 \\ [1ex] 
+ file6 & Stacked Ensemble & AUC & 0.881 \\
+ \hline
+ file7 & Stacked Ensemble & AUC & 0.881 \\
+ \hline
+ file8 & Stacked Ensemble & AUC & 0.881 \\
+ \hline
+ file9 & Stacked Ensemble & AUC & 0.881 \\
+ \hline
+ file10 & Stacked Ensemble & Accuracy & 0.779 \\ [1ex] 
  \hline
 \end{tabular}
 \end{center}
+
+\section{Scope for Improvement}
+
+The assumptions used in the model create artificial constraints on the patterns learnt by the autoencoder. Firstly, the directionality of memory leads to unusual performance during planetary transits. Since planetary transits occur over a period that is usually longer than the sequence length, incorporating bidirectional memory (past and future) can improve the detection rate. This can be done by using a bidirectional LSTM autoencoder. The resulting model can be written as:
+
+$$\mu_{seqlen} = f(\mu_{seqlen-1,seqlen-2, ..., seqlen+1, seqlen+2, ...}) + \epsilon; \epsilon \sim N(0, \sigma^2)$$
+
+It is important to note that the model hyperparameters were fixed during training due to time constraints (only 3 hours for training and prediction). These hyperparameters can vary significantly for different types of transits (duration, latitude of entry, eccentricity and orientation of orbit around the star). It is better to use tfruns - a package in R for running R scripts using different combinations of hyperparameters.
+
+Lastly, the papers that used supervised learning tried to identify the period of revolution and performed phase folding to improve the depth and resolution of light curve during planetary transits. Even though this is possible with the output of LSTM autoencoder, it is beyond the scope of this project.
 
 \vspace{60 mm}
 \section*{Appendix}
 
 \begin{itemize}
+\item Preprocessing
+\end{itemize}
+
+\lstinputlisting[language=R, firstline=65, lastline=81]{"../main.R"}
+
+\begin{itemize}
 \item Model building
 \end{itemize}
 
-\lstinputlisting[language=R, firstline=10, lastline=20]{"../main.R"}
-
-\begin{itemize}
-\item Preprocessing. 
-\end{itemize}
-
-\lstinputlisting[language=R, firstline=24, lastline=44]{"../main.R"}
+\lstinputlisting[language=R, firstline=26, lastline=28]{"../main.R"}
+\lstinputlisting[language=R, firstline=83, lastline=100]{"../main.R"}
 
 \begin{itemize}
 \item The Data Source\\
-https://exoplanetarchive.ipac.caltech.edu/bulk_data_download/Kepler_KOI_DV_wget.bat
+Kepler KOI DV bulk data downloader \footnote{Link: https://exoplanetarchive.ipac.caltech.edu/bulk\_data\_download/\\Kepler\_KOI\_DV\_wget.bat}
+
 \item References \\
-Identifying Exoplanets with Deep Learning: A Five Planet Resonant Chain around Kepler-80 and an Eighth Planet around Kepler-90 (Christopher J. Shallue, Andrew Vanderburg)\\
-Machine-learning Approaches to Exoplanet Transit Detection and Candidate Validation in Wide-field Ground-based Surveys (Schanche et al.)\\
+A box-fitting algorithm in the search for periodic transits (Kovács et al., 2002)\\
+Identifying Exoplanets with Deep Learning: A Five Planet Resonant Chain around Kepler-80 and an Eighth Planet around Kepler-90 (Christopher J. Shallue and Andrew Vanderburg, 2018)\\
+Machine-learning Approaches to Exoplanet Transit Detection and Candidate Validation in Wide-field Ground-based Surveys (Schanche et al., 2018)
 
-Advances in Financial Machine Learning by Marcos Lopez de Prado
-
-\item Text Sources:
-	\begin{itemize}
-		\item CNBC
-		\item BBC
-		\item The Verge
-		\item Guardian
-		\item Bloomberg
-		\item Coindesk
-	\end{itemize}
 \end{itemize}
 
 
