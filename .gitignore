@@ -1,4 +1,5 @@
 .ipynb_checkpoints/*
+trained_models/*
 data/*.tbl
 .Rhistory
 *.tbl
