@@ -1,7 +1,7 @@
 ---
 title: "Exoplanet Detection Using Machine Learning"
 author: "Naveen Mathew Nathan S."
-date: "April 21, 2019"
+date: "May 1, 2019"
 output:
   ioslides_presentation:
     widescreen: true
@@ -17,52 +17,49 @@ knitr::opts_chunk$set(echo = FALSE)
 
 ![](transitgif2.gif)
 
-## Data
+## Data and Process
 
-<font size="3">
-
-- Data was obtained from the Kepler space telescope. Data format: time series (equal intervals) with some missing data
-- Only the light flux was used.
-- Data is not as clean as expected.
-    - Universe is large - stars exhibit variable brightness at large distances due to several phenomenon.
-    - Not all crests and troughs are relevant.
-
-</font>
-
-```{r fig.width=3.5, fig.height=3.5, fig.align='center'}
+```{r fig.width=5, fig.height=2.5, fig.align='center'}
 library(png)
 library(grid)
 img <- readPNG("example.png")
 grid.raster(img)
 ```
 
-## Components
-
-```{r warning=F, fig.align='center', fig.width=7.5, fig.height=4}
+```{r warning=F, fig.align='center', fig.width=7.5, fig.height=2}
 img <- readPNG("flow.png")
 grid.raster(img)
 ```
 
-<font size="2">
+## Model and Learning
 
-**LSTM autoencoder hyperparameters:**
+```{r warning=F, fig.align='center', fig.width=10, fig.height=1}
+img <- readPNG("lstm_autoenc.png")
+grid.raster(img)
+```
 
-- Train-validation-test: 42%, 28%, 30%
-- Sequence length = 10
-- Layers: input (9, 1), LSTM (64), droupout (0.2), LSTM (256), droupout (0.2), LSTM (100), droupout (0.2), dense (9, 1)
-- Loss: Mean square error
+```{r warning=F, fig.align='center', fig.width=10, fig.height=4}
+img <- readPNG("learning.png")
+grid.raster(img)
+```
 
-</font>
-
-## Results: Learning and Testing
+## Results
 
 ```{r warning=F, fig.align='center', fig.width=10, fig.height=4.5}
 img <- readPNG("test_examples.png")
 grid.raster(img)
 ```
 
+<font size="2">
+
+**Color:**
+
+- Red: Detected anomaly
+
+</font>
+
 ## Scope for Improvement
 
 - Hyperparameters such as sequence length, number of hidden units in LSTM layers, number of dense layers, number of neurons in dense layer, etc. can be tuned.
 - Bi-directional LSTM autoencoder can be used instead of directional LSTM autoencoder.
-- An algorithm can be used to perform phase folding to identify number of planets and period of revolution of each planet around the star. This will also enrich the data.
+- Detections above mean can be explicitly removed before passing to phase folding. This will remove all anomalous events of increase in brightness of star, which will leave out only anomalous events of decrease in brightness of star caused by eclipsing binary star or exoplanet or comet/asteroid/debris
