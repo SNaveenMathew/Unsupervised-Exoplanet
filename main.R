@@ -3,7 +3,7 @@
 library(readr)
 library(imputeTS)
 library(reticulate)
-reticulate::use_condaenv("tf_gpu")
+# reticulate::use_condaenv("tf_gpu")
 library(keras)
 library(kerasR)
 library(imputeTS)
