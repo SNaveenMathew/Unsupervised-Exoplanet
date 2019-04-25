@@ -9,9 +9,15 @@ library(kerasR)
 library(imputeTS)
 library(reshape2)
 library(dplyr)
+library(docopt)
 source("util.R")
 source("pipeline.R")
+doc <- "Usage: main.R [PATH]
+
+PATH       Relative path of folder containing data"
+
+opt <- docopt(doc)
 
 set.seed(1)
 
-run_pipeline()
+run_pipeline(opt$PATH)
