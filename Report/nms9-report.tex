@@ -62,7 +62,7 @@ Exoplanet detection using transit method is currently a manual process. It invol
 
 The first exoplanet was discoveed in 1995. The rate of discovery of exoplanets has increased over the years. Kepler was the first space telescope that scanned for exoplanets. Nowadays there are other telescopes such as KELT, HATNet, CoRoT, TESS (future), Plato (future) and LSST (future). As a result, manual identification becomes tedious. The required manpower is often not available to perform this task.
 
-Several attempts were made to automate the process of detecting troughs in light curve. These include methods that use classical statistics, time series analysis. Recently several machine learning solutions have been used and have shown promising results. All available solutions are supervised. Therefore, they tend to exhibit the same biases as humans. We will explore an unsupervised method for exoplanet identification using light curves which is expected to involve fewer human biases. Specifically, we will employ LSTM autoencoder to compress the available information and to identify anomalous patterns - such as eclipsing binary stars or exoplanets.
+Several attempts were made to automate the process of detecting troughs in light curve. These include methods that use classical statistics, time series analysis. Recently several machine learning solutions have been used and have shown promising results. All available solutions are supervised. Therefore, they tend to exhibit the same biases as humans. An unsupervised method was explored for exoplanet identification using light curves which was expected to involve fewer human biases. Specifically, LSTM autoencoder was used to compress the available information and to identify anomalous patterns - such as eclipsing binary stars or exoplanets.
 
 \section{Literature Survey}
 
@@ -147,7 +147,7 @@ Summary statistics of the number of planets around each star:
  \end{tabular}
 \end{center}
 
-For simplicity, we will consider only RESIDUAL\_FLUX column for our analysis. The residual flux column comprises of the following components:
+For simplicity, only RESIDUAL\_FLUX column was considered for analysis. The residual flux column comprises of the following components:
 
 \begin{itemize}
   \item Trend in mean brightness of host star.
@@ -171,7 +171,7 @@ Based on these observations, it is not possible to analyze the flux as a simple 
 
 \subsection{Capping}
 
-From the above plot we observe that the flux shows unusual variations above the 3 standard deviation mark. This can be because of several reasons such as increase in intensity of the star over time or due to environmental factors that inflence the noise. To minimize the effect of this noise, we cap the values of residual flux at 97.5 percentile. However, systematic variations that lead to increased flux will lead to significant difference in representation at the bottleneck layer.
+From the above plot it was observed that the flux shows unusual variations above the 3 standard deviation mark. This can be because of several reasons such as increase in intensity of the star over time or due to environmental factors that inflence the noise. To minimize the effect of this noise, values of residual flux were capped at 97.5 percentile. However, systematic variations that lead to increased flux will lead to significant difference in representation at the bottleneck layer.
 
 \subsection{Imputing Missing Values}
 
@@ -183,7 +183,35 @@ Under the assumption of stationarity, the expected proportion of observations ou
 
 $$\mu_{seqlen} = f(\mu_{seqlen-1,seqlen-2, ...}) + \epsilon; \epsilon \sim N(0, \sigma^2)$$
 
-If we model the distribution of flux based on a series of finite number of previous values of flux, under the assumption of normality of flux, the squared error is expected to have a chi-square distribution. However, any shift in light curve will be characterized by a high value of squared reconstruction error.
+If the distribution of flux is modeled based on a series of finite number of previous values of flux, under the assumption of normality of flux, the squared error is expected to have a chi-square distribution. However, any shift in light curve will be characterized by a high value of squared reconstruction error.
+
+\subsection{Phase Folding}
+
+Phase folding is a technique used in time series, especially in analysis of astronomy time series data. The purpose is to superimpose signals to get a smoothed time series that exhibits lesser noise and more signal. Therefore, the signal-noise ratio is enhanced. This is achieved by plotting the signal vs phase.
+
+Phase folding was done using a simple idea: if the periodicity is correctly identified, the standard deviations of the series at the time slices will be approximately equal. For obtaining periodicity it was assumed that the signal repeats itself at least twice (excluding imputed values). The following steps were used:
+
+\begin{itemize}
+\item Initialize a lower and upper bound for periodicity
+\item While upper bound > lower bound
+\begin{itemize}
+\item Calculate $half\_width = \frac{upper-lower}{2}$, $mid = lower + half\_width$
+\item Create chunks of width equal to lower/mid/upper bound
+\item Calculate ratio of maximum to minimum standard deviation
+\item If ratio is smaller for lower bound
+\begin{itemize}
+\item Set lower := lower - half\_width, upper := mid
+\end{itemize}
+\item If ratio is smaller for mid bound
+\begin{itemize}
+\item Set lower := lower + half\_width/2, upper := upper - half\_width/2
+\end{itemize}
+\item If ratio is smaller for upper bound
+\begin{itemize}
+\item Set lower := mid, upper := upper + half\_width
+\end{itemize}
+\end{itemize}
+\end{itemize}
 
 \subsection{Autoencoder}
 
@@ -201,7 +229,7 @@ Several models of memory have been proposed in the past. These models explicitly
 
 \subsection{Hyper-Parameters}
 
-There are several tunable hyperparameters in the model. We use the following combination:
+There are several tunable hyperparameters in the model. The following combination of hyperparameters were used:
 
 \begin{itemize}
   \item Sequence length: 10.
@@ -232,7 +260,7 @@ The process of learning starts with random initializations of the weights in rec
 	\label{fig:learning}
 \end{figure}
 
-Based on the learning curves obtained from the 34 files we conclude that the process of learning has occurred reasonably well in 10 epochs. Almost all fits show that the training loss, MAE and MAPE are close to the validation loss, APE and MAPE respectively. Therefore, the fitted models are appropriate for prediction.
+Based on the learning curves obtained from the 34 files it was concluded that the process of learning has occurred reasonably well in 10 epochs. Almost all fits show that the training loss, MAE and MAPE are close to the validation loss, APE and MAPE respectively. Therefore, the fitted models are appropriate for prediction.
 
 \section{Results and Conclusions}
 
@@ -311,14 +339,14 @@ Lastly, the papers that used supervised learning tried to identify the period of
 \item Preprocessing
 \end{itemize}
 
-\lstinputlisting[language=R, firstline=65, lastline=81]{"../main.R"}
+\lstinputlisting[language=R, firstline=67, lastline=80]{"../main.R"}
 
 \begin{itemize}
 \item Model building
 \end{itemize}
 
-\lstinputlisting[language=R, firstline=26, lastline=28]{"../main.R"}
-\lstinputlisting[language=R, firstline=83, lastline=100]{"../main.R"}
+\lstinputlisting[language=R, firstline=161, lastline=163]{"../main.R"}
+\lstinputlisting[language=R, firstline=203, lastline=221]{"../main.R"}
 
 \begin{itemize}
 \item The Data Source\\

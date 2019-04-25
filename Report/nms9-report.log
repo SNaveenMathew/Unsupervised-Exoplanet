@@ -1,4 +1,4 @@
-This is pdfTeX, Version 3.14159265-2.6-1.40.18 (TeX Live 2017/Debian) (preloaded format=pdflatex 2019.1.20)  23 APR 2019 14:30
+This is pdfTeX, Version 3.14159265-2.6-1.40.18 (TeX Live 2017/Debian) (preloaded format=pdflatex 2019.1.20)  25 APR 2019 08:50
 entering extended mode
  restricted \write18 enabled.
  %&-line parsing enabled.
@@ -788,60 +788,56 @@ Package pdftex.def Info: example.png  used on input line 163.
 LaTeX Warning: `!h' float specifier changed to `!ht'.
 
 [2 <./example.png (PNG copy)>]
+Underfull \hbox (badness 7415) in paragraph at lines 198--199
+ []\T1/ptm/m/n/10 Calculate $\OML/ztmcm/m/it/10 half[]width \OT1/ztmcm/m/n/10 =
+ []$\T1/ptm/m/n/10 , $\OML/ztmcm/m/it/10 mid \OT1/ztmcm/m/n/10 =
+ []
+
 <LSTM-Autoencoder-Model.png, id=21, 382.42876pt x 196.735pt>
 File: LSTM-Autoencoder-Model.png Graphic file (type png)
 <use LSTM-Autoencoder-Model.png>
-Package pdftex.def Info: LSTM-Autoencoder-Model.png  used on input line 197.
+Package pdftex.def Info: LSTM-Autoencoder-Model.png  used on input line 225.
 (pdftex.def)             Requested size: 246.0pt x 126.55237pt.
-
-
-LaTeX Warning: `!h' float specifier changed to `!ht'.
-
-<learning.png, id=23, 397.485pt x 413.29407pt>
+[3 <./LSTM-Autoencoder-Model.png>]
+<learning.png, id=27, 397.485pt x 413.29407pt>
 File: learning.png Graphic file (type png)
 <use learning.png>
-Package pdftex.def Info: learning.png  used on input line 230.
+Package pdftex.def Info: learning.png  used on input line 258.
 (pdftex.def)             Requested size: 246.0pt x 255.79192pt.
-
-LaTeX Warning: `!h' float specifier changed to `!ht'.
-
-[3 <./LSTM-Autoencoder-Model.png>]
-
-LaTeX Warning: A float is stuck (cannot be placed); try class option [floatfix]
- on input line 275.
-
 <loss.png, id=28, 417.05812pt x 310.15875pt>
 File: loss.png Graphic file (type png)
 <use loss.png>
-Package pdftex.def Info: loss.png  used on input line 280.
+Package pdftex.def Info: loss.png  used on input line 308.
 (pdftex.def)             Requested size: 246.0pt x 182.94948pt.
-
-LaTeX Warning: `!h' float specifier changed to `!ht'.
-
 <mae.png, id=29, 417.05812pt x 310.15875pt>
 File: mae.png Graphic file (type png)
 <use mae.png>
-Package pdftex.def Info: mae.png  used on input line 286.
+Package pdftex.def Info: mae.png  used on input line 314.
 (pdftex.def)             Requested size: 246.0pt x 182.94948pt.
+
 
 LaTeX Warning: `!h' float specifier changed to `!ht'.
 
 <mape.png, id=30, 417.05812pt x 310.15875pt>
 File: mape.png Graphic file (type png)
 <use mape.png>
-Package pdftex.def Info: mape.png  used on input line 292.
+Package pdftex.def Info: mape.png  used on input line 320.
 (pdftex.def)             Requested size: 246.0pt x 182.94948pt.
 
 LaTeX Warning: `!h' float specifier changed to `!ht'.
 
-[4 <./learning.png (PNG copy)> <./loss.png (PNG copy)> <./mae.png (PNG copy)> <
-./mape.png (PNG copy)>]
-Overfull \hbox (18.47926pt too wide) detected at line 301
+
+Overfull \hbox (18.47926pt too wide) detected at line 329
 \OML/ztmcm/m/it/10 ^^V[] \OT1/ztmcm/m/n/10 = \OML/ztmcm/m/it/10 f\OT1/ztmcm/m/n
 /10 (\OML/ztmcm/m/it/10 ^^V[]\OT1/ztmcm/m/n/10 ) + \OML/ztmcm/m/it/10 ^^O\OT1/z
 tmcm/m/n/10 ; \OML/ztmcm/m/it/10 ^^O \OMS/ztmcm/m/n/10 ^^X \OML/ztmcm/m/it/10 N
 \OT1/ztmcm/m/n/10 (0\OML/ztmcm/m/it/10 ; ^^[[]\OT1/ztmcm/m/n/10 )
  []
+
+[4 <./learning.png (PNG copy)> <./loss.png (PNG copy)>]
+
+LaTeX Warning: A float is stuck (cannot be placed); try class option [floatfix]
+ on input line 332.
 
 (/usr/share/texlive/texmf-dist/tex/latex/listings/lstlang1.sty
 File: lstlang1.sty 2015/06/04 1.6 listings language file
@@ -853,47 +849,45 @@ File: lstlang2.sty 2015/06/04 1.6 listings language file
 File: lstlang3.sty 2015/06/04 1.6 listings language file
 ) (../main.R
 LaTeX Font Info:    Font shape `OT1/ptm/bx/n' in size <8> not available
-(Font)              Font shape `OT1/ptm/b/n' tried instead on input line 65.
+(Font)              Font shape `OT1/ptm/b/n' tried instead on input line 67.
 LaTeX Font Info:    Font shape `OT1/ptm/bx/n' in size <5> not available
-(Font)              Font shape `OT1/ptm/b/n' tried instead on input line 65.
-LaTeX Font Info:    Font shape `OMS/ptm/m/n' in size <8> not available
-(Font)              Font shape `OMS/cmsy/m/n' tried instead on input line 73.
+(Font)              Font shape `OT1/ptm/b/n' tried instead on input line 67.
 )
 (../main.R) (../main.R)
-Underfull \hbox (badness 10000) in paragraph at lines 327--328
+Underfull \hbox (badness 10000) in paragraph at lines 355--356
  
  []
 
 
-Underfull \hbox (badness 1635) in paragraph at lines 331--332
+Underfull \hbox (badness 1635) in paragraph at lines 359--360
  \T1/ptm/m/n/10 field Ground-based Sur-veys (Schanche et al.,
  []
 
-(./nms9-report.bbl) [5] (./nms9-report.aux) ) 
+(./nms9-report.bbl [5 <./mae.png (PNG copy)> <./mape.png (PNG copy)>]) [6]
+(./nms9-report.aux) ) 
 Here is how much of TeX's memory you used:
- 7728 strings out of 492982
- 97923 string characters out of 6134896
- 936203 words of memory out of 5000000
- 11109 multiletter control sequences out of 15000+600000
- 60624 words of font info for 111 fonts, out of 8000000 for 9000
+ 7731 strings out of 492982
+ 97992 string characters out of 6134896
+ 502608 words of memory out of 5000000
+ 11113 multiletter control sequences out of 15000+600000
+ 60368 words of font info for 110 fonts, out of 8000000 for 9000
  1141 hyphenation exceptions out of 8191
  41i,7n,43p,739b,1855s stack positions out of 5000i,500n,10000p,200000b,80000s
-{/usr/share/texlive/texmf-dist/fon
-ts/enc/dvips/base/8r.enc}{/usr/share/texmf/fonts/enc/dvips/cm-super/cm-super-t1
-.enc}</usr/share/texlive/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi10.pfb><
-/usr/share/texlive/texmf-dist/fonts/type1/public/amsfonts/cm/cmr10.pfb></usr/sh
-are/texlive/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy10.pfb></usr/share/te
-xlive/texmf-dist/fonts/type1/public/amsfonts/cm/cmsy8.pfb></usr/share/texmf/fon
-ts/type1/public/cm-super/sfss0700.pfb></usr/share/texmf/fonts/type1/public/cm-s
-uper/sfss1000.pfb></usr/share/texmf/fonts/type1/public/cm-super/sfsx0900.pfb></
-usr/share/texmf/fonts/type1/public/cm-super/sfsx1440.pfb></usr/share/texlive/te
-xmf-dist/fonts/type1/urw/symbol/usyr.pfb></usr/share/texlive/texmf-dist/fonts/t
-ype1/urw/times/utmb8a.pfb></usr/share/texlive/texmf-dist/fonts/type1/urw/times/
-utmr8a.pfb></usr/share/texlive/texmf-dist/fonts/type1/urw/times/utmri8a.pfb>
-Output written on nms9-report.pdf (5 pages, 1151214 bytes).
+{/usr/share/texlive/texmf-dist/fonts/enc/dvips/base/8r.enc
+}{/usr/share/texmf/fonts/enc/dvips/cm-super/cm-super-t1.enc}</usr/share/texlive
+/texmf-dist/fonts/type1/public/amsfonts/cm/cmmi10.pfb></usr/share/texlive/texmf
+-dist/fonts/type1/public/amsfonts/cm/cmr10.pfb></usr/share/texlive/texmf-dist/f
+onts/type1/public/amsfonts/cm/cmsy10.pfb></usr/share/texmf/fonts/type1/public/c
+m-super/sfss0700.pfb></usr/share/texmf/fonts/type1/public/cm-super/sfss1000.pfb
+></usr/share/texmf/fonts/type1/public/cm-super/sfsx0900.pfb></usr/share/texmf/f
+onts/type1/public/cm-super/sfsx1440.pfb></usr/share/texlive/texmf-dist/fonts/ty
+pe1/urw/symbol/usyr.pfb></usr/share/texlive/texmf-dist/fonts/type1/urw/times/ut
+mb8a.pfb></usr/share/texlive/texmf-dist/fonts/type1/urw/times/utmr8a.pfb></usr/
+share/texlive/texmf-dist/fonts/type1/urw/times/utmri8a.pfb>
+Output written on nms9-report.pdf (6 pages, 1146039 bytes).
 PDF statistics:
- 78 PDF objects out of 1000 (max. 8388607)
- 51 compressed objects within 1 object stream
+ 77 PDF objects out of 1000 (max. 8388607)
+ 50 compressed objects within 1 object stream
  0 named destinations out of 1000 (max. 500000)
  31 words of extra memory for PDF output out of 10000 (max. 10000000)
 
