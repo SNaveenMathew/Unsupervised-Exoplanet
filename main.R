@@ -19,7 +19,6 @@ get_period_range <- function(wave) {
   max_iter <- 30
   
   while(iter <= max_iter) {
-    print(iter)
     half_width <- (upper-lower)/2
     mid <- floor(lower + half_width)
     lower_ratio <- get_ratio(wave, lower)
@@ -122,22 +121,31 @@ save_plot <- function(y_pred, y, out_file, thr = NULL, lwr = NULL, upr = NULL) {
     starts <- c()
     ends <- c()
     i <- 1
-    while(i <= length(indices)) {
+    while(i < (length(indices)-1)) {
       starts <- c(starts, indices[i])
-      while(idx[indices[i] + 1, 1] == idx[indices[i], 1] & i != length(indices)) {
+      while(idx[indices[i] + 1, 1] == idx[indices[i], 1] & i < (length(indices)-1)) {
         i <- i + 1
       }
-      ends <- c(ends, indices[i])
+      if(i == (length(indices)-1)) {
+        ends <- c(ends, indices[i + 1])
+      } else {
+        ends <- c(ends, indices[i])
+      }
       i <- i + 1
     }
-    all_diffs <- sapply(ends, function(end) starts-end)
-    lst <- lapply(1:length(starts), function(i) starts[i]:ends[i])
-    keeps <- apply(all_diffs, 1, function(row) {
-      return(any(between(x = abs(row), left = lwr, right = upr)))
-    })
-    indices <- unlist(lst[keeps])
-    idx <- rep(FALSE, length(y_test))
-    idx[indices] <- TRUE
+    if(length(starts) > 1) {
+      all_diffs <- sapply(ends, function(end) starts-end)
+      lst <- lapply(1:length(starts), function(i) starts[i]:ends[i])
+      keeps <- apply(all_diffs, 1, function(row) {
+        return(any(between(x = abs(row), left = lwr, right = upr)))
+      })
+      indices <- unlist(lst[keeps])
+      idx <- rep(FALSE, length(y_test))
+      idx[indices] <- TRUE
+    } else {
+      idx <- rep(FALSE, length(y_test))
+      idx[starts:ends] <- TRUE
+    }
   }
   png(out_file, width = 1366, height = 768)
   plot(y_test, col = idx + 1)
@@ -182,6 +190,7 @@ run_hrs <- 3
 diff_time <- 0
 metrics_df <- data.frame()
 while(i <= length(files) & diff_time < 3600 * run_hrs) {
+  print(i)
   file <- files[i]
   wave <- get_wave(file)
   train_test_split <- split_train_test(wave, train_ratio)
@@ -207,52 +216,60 @@ while(i <= length(files) & diff_time < 3600 * run_hrs) {
       batch_size = batch_size,
       epochs = epochs,
       callbacks = list(reduceLr),
-      validation_split = 0.3
+      validation_split = 0.3,
+      verbose = 0
     )
+    save_model_hdf5(model, paste0("trained_models/", out_files[i], ".hdf5"))
     png(paste0("plots/learning_curve/", out_files[i], "_learning.png"),
         width = 1366, height = 768)
     print(plot(his))
     dev.off()
-    # wave <- get_wave(file)
-    lwr_upr <- get_period_range(wave)
-    lwr <- lwr_upr[1]
-    upr <- lwr_upr[2]
-    if(lwr == upr) {
-      thr <- as.numeric("Inf")
-    } else {
-      y_train_pred <- predict(model, x_train)
-      sqr_error <- (y_train_pred - y_train)^2
-      avg_error <- mean(sqr_error)
-      std_error <- sd(sqr_error)
-      thr <- (avg_error + 2 * std_error)
-    }
-    y_test_pred <- predict(model, x_test)
-    save_plot(y_pred = y_test_pred, y = y_test,
-              out_file = paste0("plots/test_pred_plot/", out_files[i],
-                                "_test_plot.png"),
-              thr = thr, lwr = lwr, upr = upr)
-    tm1 <- Sys.time()
-    i <- i + 1
-    diff_time <- as.double.difftime(tm1 - tm, units = "secs")
-    metrics_df <- rbind(metrics_df, data.frame(
-      train_loss = his$metrics$loss[10],
-      train_mape = his$metrics$mean_absolute_percentage_error[10],
-      train_mae = his$metrics$mean_absolute_error[10],
-      val_loss = his$metrics$val_loss[10],
-      val_mape = his$metrics$val_mean_absolute_percentage_error[10],
-      val_mae = his$metrics$val_mean_absolute_error[10]))
-    save_model_hdf5(model, paste0("trained_models/", out_files[i], ".hdf5"))
+  } else {
+    model <- load_model_hdf5(mdl_file)
   }
+  lwr_upr <- get_period_range(wave)
+  lwr <- lwr_upr[1]
+  upr <- lwr_upr[2]
+  if(lwr == upr) {
+    thr <- as.numeric("Inf")
+  } else {
+    y_train_pred <- predict(model, x_train)
+    sqr_error <- (y_train_pred - y_train)^2
+    avg_error <- mean(sqr_error)
+    std_error <- sd(sqr_error)
+    thr <- (avg_error + 2 * std_error)
+  }
+  y_test_pred <- predict(model, x_test)
+  save_plot(y_pred = y_test_pred, y = y_test,
+            out_file = paste0("plots/test_pred_plot/", out_files[i],
+                              "_test_plot.png"),
+            thr = thr, lwr = lwr, upr = upr)
+  tm1 <- Sys.time()
+  diff_time <- as.double.difftime(tm1 - tm, units = "secs")
+  metrics_df <- rbind(metrics_df, data.frame(
+    train_loss = his$metrics$loss[10],
+    train_mape = his$metrics$mean_absolute_percentage_error[10],
+    train_mae = his$metrics$mean_absolute_error[10],
+    val_loss = his$metrics$val_loss[10],
+    val_mape = his$metrics$val_mean_absolute_percentage_error[10],
+    val_mae = his$metrics$val_mean_absolute_error[10]))
+  i <- i + 1
 }
 
 metrics_df$file <- files[1:(i - 1)]
 
 png("Presentation/example.png")
+wave <- get_wave(file)
 plot(wave)
+mn <- mean(wave, na.rm = T)
+stdev <- sd(wave, na.rm = T)
+lns1 <- mn + c(-1, 1) * stdev
+lns2 <- mn + c(-2, 2) * stdev
+lns3 <- mn + c(-3, 3) * stdev
 abline(h = lns1, col = "red")
 abline(h = lns2, col = "green")
 abline(h = lns3, col = "blue")
-legend("topright", legend = c("1 * std", "2 * std", "3 * std"),
+legend("bottomleft", legend = c("1 * std", "2 * std", "3 * std"),
        fill = c("red", "green", "blue"))
 dev.off()
 
