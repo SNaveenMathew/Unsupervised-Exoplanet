@@ -17,7 +17,6 @@ get_period_range <- function(wave) {
   upper <- floor(length(wave)/2)
   iter <- 1
   max_iter <- 30
-  
   while(iter <= max_iter) {
     half_width <- (upper-lower)/2
     mid <- floor(lower + half_width)
@@ -56,11 +55,9 @@ get_period_range <- function(wave) {
     }
     iter <- iter + 1
   }
-  
   if(upper > length(wave)/2) {
     upper <- lower <- floor(length(wave)/2)
   }
-  
   return(c(lower, upper))
 }
 
