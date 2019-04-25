@@ -20,12 +20,12 @@ The code has been tested on the following platforms:
 - R Studio Cloud
 - R version 3.5.1
 
-## Roadmap (2019/04/14)
+## Roadmap (2019/04/25)
 
 - Finalizing the problem (done)
 - Downloading the data (done)
 - Preprocessing the data to get number of planets per star (done)
 - Translating the python code into R (done)
 - Manual tagging and verification (done)
-- Phase folding (tentative, depending on time)
+- Phase folding (done)
 - Scope for future (done)
