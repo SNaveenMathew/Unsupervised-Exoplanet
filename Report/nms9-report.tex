@@ -74,6 +74,12 @@ Christopher et al. (2018) applied logistic regression, fully connected feed forw
 
 These efforts all involve supervised machine learning. They incorporate human biases in the output variable. Therefore, the patterns they learn contain human biases. The objective of this project is to use anomaly detection to flag different types of patterns - not limited to planetary transits.
 
+Chong et al. (2017) applied a spatiotemporal architecture for anomaly detection in videos. The architecture included two components: one for spatial feature representation and one for learning temporal evolution of spatial features. Through experiments they found that the results were comparable to state-of-the-art methods and was considerably faster - therefore it supported videos with higher frame rates.
+
+Marchi et al. (2015) applied bidirectional LSTM (denoising) autoencoder in unsupervised setting to detect anomalous behavior in acoustic signals. They used the reconstruction error to detect anomalies. The autoencoder was trained on a public dataset of recordings of in-hom situations such as talking, watching television, playing and eating. The model achieved up to 0.934 F-measure, which significantly outperformed state-of-the-art methods.
+
+Malhotra et al. (2016) applied LSTM autoencoder for anomaly detection in signals from multiple detectors. The conducted the experiment on three public data sets: power demand, space shuttle and ECG; and two real-world engine data sets. They observed that the LSTM autoencoder was robust in predictable, unpredictable, periodic, aperiodic and quasi-peridic time series. They also observed that the model was able to detect anomalies in short time series as well as long time series.
+
 \section{Data Description}
 
 Kepler contains several forms of light curve data. For this project Kepler KOI DV data set was chosen. The expected size was around 100 GB. Only a 25 GB subset was downloaded for convenience. The downloaded data contains 3050 files. Each file consists of time series and covers Q1-Q16.
@@ -210,7 +216,13 @@ Phase folding was done using a simple idea: if the periodicity is correctly iden
 \begin{itemize}
 \item Set lower := mid, upper := upper + half\_width
 \end{itemize}
+\item If all ratios are equal
+\begin{itemize}
+\item Do not update lower and upper
+\item Exit loop
 \end{itemize}
+\end{itemize}
+\item Return values: lower and upper
 \end{itemize}
 
 \subsection{Autoencoder}
@@ -322,44 +334,76 @@ Based on the learning curves obtained from the 34 files it was concluded that th
 	\label{fig:mape}
 \end{figure}
 
+\begin{figure}[h!]
+	\includegraphics[width=\linewidth]{eg1_before.png}
+	\caption{Example detection - before phase folding}
+	\label{fig:eg1_before}
+\end{figure}
+
+\begin{figure}[h!]
+	\includegraphics[width=\linewidth]{eg1_after.png}
+	\caption{Example detection - after phase folding}
+	\label{fig:eg1_after}
+\end{figure}
+
+\begin{figure}[h!]
+	\includegraphics[width=\linewidth]{eg2_before.png}
+	\caption{Example detection - before phase folding}
+	\label{fig:eg2_before}
+\end{figure}
+
+\begin{figure}[h!]
+	\includegraphics[width=\linewidth]{eg2_after.png}
+	\caption{Example detection - after phase folding}
+	\label{fig:eg2_after}
+\end{figure}
+
 \section{Scope for Improvement}
 
 The assumptions used in the model create artificial constraints on the patterns learnt by the autoencoder. Firstly, the directionality of memory leads to unusual performance during planetary transits. Since planetary transits occur over a period that is usually longer than the sequence length, incorporating bidirectional memory (past and future) can improve the detection rate. This can be done by using a bidirectional LSTM autoencoder. The resulting model can be written as:
 
 $$\mu_{seqlen} = f(\mu_{seqlen-1,seqlen-2, ..., seqlen+1, seqlen+2, ...}) + \epsilon; \epsilon \sim N(0, \sigma^2)$$
 
-It is important to note that the model hyperparameters were fixed during training due to time constraints (only 3 hours for training and prediction). These hyperparameters can vary significantly for different types of transits (duration, latitude of entry, eccentricity and orientation of orbit around the star). It is better to use tfruns - a package in R for running R scripts using different combinations of hyperparameters.
+The model hyperparameters were fixed during training due to time constraints (only 3 hours for training and prediction). These hyperparameters can vary significantly for different types of transits (duration, latitude of entry, eccentricity and orientation of orbit around the star). Hyperparameter tuning using tfruns is recommended.
 
-Lastly, the papers that used supervised learning tried to identify the period of revolution and performed phase folding to improve the depth and resolution of light curve during planetary transits. Even though this is possible with the output of LSTM autoencoder, it is beyond the scope of this project.
+Lastly, cases of anomalies above the mean were not explicitly excluded. This was done intentionally to avoid introducing human bias into the model - anomalous increase in star brightness is also an interesting astronomical event that may require scrutiny. Explicit removal of these detections can lead to better exoplanet transit detection.
 
-\vspace{60 mm}
+\vspace{140 mm}
 \section*{Appendix}
+
+\subsection{Code Samples}
 
 \begin{itemize}
 \item Preprocessing
 \end{itemize}
 
-\lstinputlisting[language=R, firstline=67, lastline=80]{"../main.R"}
+\lstinputlisting[language=R, firstline=64, lastline=77]{"../main.R"}
 
 \begin{itemize}
 \item Model building
 \end{itemize}
 
-\lstinputlisting[language=R, firstline=161, lastline=163]{"../main.R"}
-\lstinputlisting[language=R, firstline=203, lastline=221]{"../main.R"}
+\lstinputlisting[language=R, firstline=158, lastline=160]{"../main.R"}
+\lstinputlisting[language=R, firstline=200, lastline=218]{"../main.R"}
 
 \begin{itemize}
-\item The Data Source\\
-Kepler KOI DV bulk data downloader \footnote{Link: https://exoplanetarchive.ipac.caltech.edu/bulk\_data\_download/\\Kepler\_KOI\_DV\_wget.bat}
+\item Phase folding
+\end{itemize}
 
-\item References \\
+\lstinputlisting[language=R, firstline=15, lastline=62]{"../main.R"}
+
+
+\subsection{References}
 \begin{itemize}
+\item Kepler KOI DV bulk data downloader \footnote{Link: https://exoplanetarchive.ipac.caltech.edu/bulk\_data\_download/\\Kepler\_KOI\_DV\_wget.bat}
 \item A box-fitting algorithm in the search for periodic transits (Kovács et al., 2002)
 \item Identifying Exoplanets with Deep Learning: A Five Planet Resonant Chain around Kepler-80 and an Eighth Planet around Kepler-90 (Christopher J. Shallue and Andrew Vanderburg, 2018)
 \item Machine-learning Approaches to Exoplanet Transit Detection and Candidate Validation in Wide-field Ground-based Surveys (Schanche et al., 2018)
+\item Abnormal Event Detection in Videos using Spatiotemporal Autoencoder (Chong et al., 2017)
+\item A novel approach for automatic acoustic novelty detection using a denoising autoencoder with bidirectional LSTM neural networks (Marchi et al., 2015)
+\item LSTM-based Encoder-Decoder for Multi-sensor Anomaly Detection (Malhotra et al., 2016)
 \end{itemize}
 
-\end{itemize}
 
 
 \end{document}
