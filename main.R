@@ -12,9 +12,9 @@ library(dplyr)
 library(docopt)
 source("util.R")
 source("pipeline.R")
-doc <- "Usage: main.R [PATH]
+doc <- "Usage: main.R [--PATH PATH]
 
-PATH       Relative path of folder containing data"
+--PATH=PATH       Relative path of folder containing data [default: data]"
 
 opt <- docopt(doc)
 
