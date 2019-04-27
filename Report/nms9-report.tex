@@ -72,13 +72,13 @@ Pearson et al. (2017) discussed the use of neural networks for exoplanet detecti
 
 Christopher et al. (2018) applied logistic regression, fully connected feed forward network and CNN with pooling on human tagged transit data to predict planetary transits from light curves. They applied different types of data augmentation to create artificial data from manually labelled observations. They also used three different inputs - global, local and both - to classify the light curve image. Google Vizier was used for hyperparemeter tuning. Finally, the models were averaged to reduce the error rate. Using this method they were able to identify 2 new candidates that were later confirmed as exoplanets.
 
-These efforts all involve supervised machine learning. They incorporate human biases in the output variable. Therefore, the patterns they learn contain human biases. The objective of this project is to use anomaly detection to flag different types of patterns - not limited to planetary transits.
-
 Chong et al. (2017) applied a spatiotemporal architecture for anomaly detection in videos. The architecture included two components: one for spatial feature representation and one for learning temporal evolution of spatial features. Through experiments they found that the results were comparable to state-of-the-art methods and was considerably faster - therefore it supported videos with higher frame rates.
 
 Marchi et al. (2015) applied bidirectional LSTM (denoising) autoencoder in unsupervised setting to detect anomalous behavior in acoustic signals. They used the reconstruction error to detect anomalies. The autoencoder was trained on a public dataset of recordings of in-hom situations such as talking, watching television, playing and eating. The model achieved up to 0.934 F-measure, which significantly outperformed state-of-the-art methods.
 
 Malhotra et al. (2016) applied LSTM autoencoder for anomaly detection in signals from multiple detectors. The conducted the experiment on three public data sets: power demand, space shuttle and ECG; and two real-world engine data sets. They observed that the LSTM autoencoder was robust in predictable, unpredictable, periodic, aperiodic and quasi-peridic time series. They also observed that the model was able to detect anomalies in short time series as well as long time series.
+
+These efforts all involve supervised machine learning. They incorporate human biases in the output variable. Therefore, the patterns they learn contain human biases. The objective of this project is to use anomaly detection to flag different types of patterns - not limited to planetary transits.
 
 \section{Data Description}
 
