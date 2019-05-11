@@ -13,6 +13,7 @@ library(kerasR)
 library(png)
 library(grid)
 library(shinydashboard)
+library(glue)
 
 return_stars <- function(processed) {
   processed <- strsplit(processed, "_")
@@ -60,7 +61,8 @@ shinyApp(ui = dashboardPage(
                                  href = "https://github.com/SNaveenMathew/Unsupervised-Exoplanet",
                                  title = "See the code on github"))),
   dashboardSidebar(collapsed = T,
-    div(textOutput("welcome"), style = "padding: 20px")
+    div(textOutput("welcome"), style = "padding: 20px"),
+    div(uiOutput("kplr_id"))
   ),
   dashboardBody(
     shinyjs::useShinyjs(),
@@ -88,27 +90,44 @@ shinyApp(ui = dashboardPage(
     }
   })
   
+  output$kplr_id <- renderUI({
+    if(credentials()$user_auth) {
+      return(selectInput(inputId = "kplr_id", label = "Select Kepler ID:",
+                         choices = options, selected = options[1]))
+    }
+  })
+  
   getImage <- reactive({
-    if(credentials()$user_auth) return(NULL)
+    if(!credentials()$user_auth) return(NULL)
     files <- list.files("../plots/test_pred_plot/", pattern = input$kplr_id,
                         full.names = T)
-    file <- files[1]
-    img <- readPNG(file)
-    return(grid.raster(img))
+    if(length(files) > 0) {
+      file <- files[1]
+      img <- readPNG(file)
+      return(grid.raster(img))
+    } else {
+      return(NULL)
+    }
   })
+  
   output$trainPlot <- renderPlot({
     return(getImage())
   })
-  page <- reactive({
-    fluidPage(
-      selectInput(inputId = "kplr_id", label = "Select Kepler ID:",
-                  choices = options, selected = options[1]),
-      plotOutput("trainPlot")
-    )
+  
+  user_info <- reactive({
+    return(credentials()$info)
   })
+  
+  output$welcome <- renderText({
+    req(credentials()$user_auth)
+    return(glue("Welcome {user_info()$name}"))
+  })
+  
   output$planet_page <- renderUI({
     req(credentials()$user_auth)
-    return(page())
+    return(fluidPage(
+      plotOutput("trainPlot")
+    ))
   })
 })
 
