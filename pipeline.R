@@ -12,7 +12,8 @@ run_pipeline <- function(data_dir = "data") {
   # earlyStopping <- EarlyStopping(monitor = "val_acc", min_delta = -0.001,
   #                                patience = 2)
   
-  files <- list.files(path = paste0(data_dir, "/"), pattern = "*.tbl", full.names = T)
+  files <- list.files(path = paste0(data_dir, "/"), pattern = "*.tbl",
+                      full.names = T)
   system("sh counts.sh")
   text <- system("sh counts_df.sh", intern = T)
   text <- t(sapply(strsplit(text, "\t"), function(elem) c(elem[1], elem[2])))
@@ -24,6 +25,7 @@ run_pipeline <- function(data_dir = "data") {
   setwd("plots")
   dir.create("learning_curve", showWarnings = F)
   dir.create("test_pred_plot", showWarnings = F)
+  dir.create("train_pred_plot", showWarnings = F)
   setwd("../")
   dir.create("trained_models", showWarnings = F)
   
@@ -49,11 +51,11 @@ run_pipeline <- function(data_dir = "data") {
     mdl_file <- paste0("trained_models/", out_files[i], ".hdf5")
     if(!file.exists(mdl_file)) {
       model <- keras_model_sequential() %>%
-        layer_lstm(input_shape = shp, units = 64, return_sequences = T) %>%
+        layer_cudnn_lstm(input_shape = shp, units = 64, return_sequences = T) %>%
         layer_dropout(0.2) %>%
-        layer_lstm(256, return_sequences = T) %>%
+        layer_cudnn_lstm(256, return_sequences = T) %>%
         layer_dropout(0.2) %>%
-        layer_lstm(100, return_sequences = T) %>%
+        layer_cudnn_lstm(100, return_sequences = T) %>%
         layer_dropout(0.2) %>%
         layer_flatten() %>%
         layer_dense(units = 1, activation = "linear")
@@ -64,8 +66,8 @@ run_pipeline <- function(data_dir = "data") {
         batch_size = batch_size,
         epochs = epochs,
         callbacks = list(reduceLr),
-        validation_split = 0.3,
-        verbose = 0
+        validation_split = 0.3#,
+        # verbose = 0
       )
       save_model_hdf5(model, paste0("trained_models/", out_files[i], ".hdf5"))
       png(paste0("plots/learning_curve/", out_files[i], "_learning.png"),
@@ -94,6 +96,11 @@ run_pipeline <- function(data_dir = "data") {
       std_error <- sd(sqr_error)
       thr <- (avg_error + 2 * std_error)
     }
+    y_train_pred <- predict(model, x_train)
+    save_plot(y_pred = y_train_pred, y = y_train,
+              out_file = paste0("plots/train_pred_plot/", out_files[i],
+                                "_train_plot.png"),
+              thr = thr, lwr = lwr, upr = upr)
     y_test_pred <- predict(model, x_test)
     save_plot(y_pred = y_test_pred, y = y_test,
               out_file = paste0("plots/test_pred_plot/", out_files[i],
@@ -127,21 +134,24 @@ run_pipeline <- function(data_dir = "data") {
   with(loss_df,
        plot(x = as.integer(factor(file)), y = value, col = variable, pch = 20,
             xlab = "File", xaxt = 'n'))
-  legend("topright", legend = unique(loss_df$variable), fill = unique(loss_df$variable))
+  legend("topright", legend = unique(loss_df$variable),
+         fill = unique(loss_df$variable))
   dev.off()
   png("Report/mae.png", width = 554, height = 412)
   mae_df <- met_df[grep(met_df$variable, pattern =  ".*_mae$"), ]
   with(mae_df,
        plot(x = as.integer(factor(file)), y = value, col = variable, pch = 20,
             xlab = "File", xaxt = 'n'))
-  legend("topright", legend = unique(mae_df$variable), fill = unique(mae_df$variable))
+  legend("topright", legend = unique(mae_df$variable),
+         fill = unique(mae_df$variable))
   dev.off()
   png("Report/mape.png", width = 554, height = 412)
   mape_df <- met_df[grep(met_df$variable, pattern =  ".*_mape$"), ]
   with(mape_df,
        plot(x = as.integer(factor(file)), y = value, col = variable, pch = 20,
             xlab = "File", xaxt = 'n'))
-  legend("topright", legend = unique(mape_df$variable), fill = unique(mape_df$variable))
+  legend("topright", legend = unique(mape_df$variable),
+         fill = unique(mape_df$variable))
   dev.off()
   return(metrics_df)
 }
