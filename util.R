@@ -51,8 +51,8 @@ get_wave <- function(file) {
   cols <- strsplit(cols, "\\ {0,}\\|")[[1]][-c(1)]
   colnames(temp) <- cols
   wave <- temp$RESIDUAL_FLUX
+  perc_97.5 <- quantile(wave, 0.975, na.rm = T)
   wave <- na.interpolation(wave, option = "stine")
-  perc_97.5 <- quantile(wave, 0.975)
   wave[wave > perc_97.5] <- perc_97.5
   return(wave)
 }
