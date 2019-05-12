@@ -12,16 +12,11 @@ get_period_range <- function(wave) {
     if(iter > 1) {
       all_vec <- c(lower_ratio, mid_ratio, upper_ratio)
       if(length(unique(all_vec)) != 1) {
-        if(lower_ratio == min(all_vec)) {
-          lower <- floor(lower - half_width)
-          upper <- mid
-        } else if(mid_ratio == min(all_vec)) {
-          lower <- floor(lower + half_width/2)
-          upper <- floor(upper - half_width/2)
-        } else {
-          lower <- mid
-          upper <- floor(upper + half_width)
-        }
+        lowers <- c(floor(lower - half_width), floor(lower + half_width/2), mid)
+        uppers <- c(mid, floor(upper - half_width/2), floor(upper + half_width))
+        min_idx <- which.min(all_vec)
+        lower <- lowers[min_idx]
+        upper <- uppers[min_idx]
       } else {
         iter <- max_iter + 1
       }
@@ -123,11 +118,13 @@ save_plot <- function(y_pred, y, out_file, thr = NULL, lwr = NULL, upr = NULL) {
         return(any(between(x = abs(row), left = lwr, right = upr)))
       })
       indices <- unlist(lst[keeps])
-      idx <- rep(FALSE, length(y_test))
+      idx <- rep(FALSE, length(y))
       idx[indices] <- TRUE
     } else {
-      idx <- rep(FALSE, length(y_test))
-      idx[starts:ends] <- TRUE
+      idx <- rep(FALSE, length(y))
+      if(length(starts) == 1) {
+        idx[starts:ends] <- TRUE
+      }
     }
   }
   png(out_file, width = 1366, height = 768)

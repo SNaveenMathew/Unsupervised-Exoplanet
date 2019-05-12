@@ -4,7 +4,7 @@ output: flexdashboard::flex_dashboard
 runtime: shiny
 ---
 
-```{r global, include=FALSE}
+```{r global, include = FALSE}
 # load data in 'global' chunk so it can be shared by all users of the dashboard
 reticulate::use_condaenv("tf_gpu")
 library(shinyauthr)
@@ -53,17 +53,21 @@ options <- c(processed, remaining)
 
 ```{r}
 shinyApp(ui = dashboardPage(
-  dashboardHeader(title = "Exoplanet Candidates Page",
-                  tags$li(class = "dropdown", style = "padding: 8px;",
-                          shinyauthr::logoutUI("logout")),
-                  tags$li(class = "dropdown", 
-                          tags$a(icon("github"), 
-                                 href = "https://github.com/SNaveenMathew/Unsupervised-Exoplanet",
-                                 title = "See the code on github"))),
+  dashboardHeader(
+    title = "Exoplanet Candidates Page",
+    tags$li(class = "dropdown", style = "padding: 8px;",
+            shinyauthr::logoutUI("logout")),
+    tags$li(
+      class = "dropdown", 
+      tags$a(icon("github"), 
+             href = "https://github.com/SNaveenMathew/Unsupervised-Exoplanet",
+             title = "See the code on github"))),
+  
   dashboardSidebar(collapsed = T,
     div(textOutput("welcome"), style = "padding: 20px"),
     div(uiOutput("kplr_id"))
   ),
+  
   dashboardBody(
     shinyjs::useShinyjs(),
     shinyauthr::loginUI("login"),
@@ -72,8 +76,11 @@ shinyApp(ui = dashboardPage(
     ),
     uiOutput("planet_page")
   )
-), server = function(input, output) {
-  logout_init <- callModule(shinyauthr::logout, "logout", reactive(credentials()$user_auth))
+),
+
+server = function(input, output) {
+  logout_init <- callModule(shinyauthr::logout, "logout",
+                            reactive(credentials()$user_auth))
   
   credentials <- callModule(shinyauthr::login, "login", 
                             data = user_base,
