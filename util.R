@@ -42,7 +42,7 @@ get_period_range <- function(wave) {
   return(c(lower, upper))
 }
 
-get_wave <- function(file) {
+get_wave <- function(file, impute = T) {
   temp <- data.frame(read_delim(file, delim = " ", skip = 35, col_names = F),
                      stringsAsFactors = F)
   temp$X8 <- NULL
@@ -52,7 +52,8 @@ get_wave <- function(file) {
   colnames(temp) <- cols
   wave <- temp$RESIDUAL_FLUX
   perc_97.5 <- quantile(wave, 0.975, na.rm = T)
-  wave <- na.interpolation(wave, option = "stine")
+  if(impute)
+    wave <- na.interpolation(wave, option = "linear")
   wave[wave > perc_97.5] <- perc_97.5
   return(wave)
 }
