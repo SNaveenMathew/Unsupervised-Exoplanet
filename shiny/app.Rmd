@@ -108,6 +108,7 @@ server = function(input, output) {
     if(!credentials()$user_auth) return(NULL)
     files <- list.files("../plots/test_pred_plot/", pattern = input$kplr_id,
                         full.names = T)
+    print(input$trainPlot_brush)
     if(length(files) > 0) {
       file <- files[1]
       img <- readPNG(file)
@@ -133,7 +134,7 @@ server = function(input, output) {
   output$planet_page <- renderUI({
     req(credentials()$user_auth)
     return(fluidPage(
-      plotOutput("trainPlot")
+      plotOutput("trainPlot", brush = brushOpts(id = "trainPlot_brush", direction = 'x'))
     ))
   })
 })

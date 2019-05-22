@@ -94,6 +94,7 @@ save_plot <- function(y_pred, y, out_file, thr = NULL, lwr = NULL, upr = NULL) {
   }
   
   idx <- sqr_error > thr
+  df <- data.frame()
   
   if(!is.infinite(thr)) {
     indices <- which(idx)
@@ -121,14 +122,17 @@ save_plot <- function(y_pred, y, out_file, thr = NULL, lwr = NULL, upr = NULL) {
       indices <- unlist(lst[keeps])
       idx <- rep(FALSE, length(y))
       idx[indices] <- TRUE
+      
     } else {
       idx <- rep(FALSE, length(y))
       if(length(starts) == 1) {
         idx[starts:ends] <- TRUE
       }
     }
+    df <- data.frame(start = starts, end = ends)
   }
   png(out_file, width = 1366, height = 768)
   plot(y, col = idx + 1)
   dev.off()
+  return(df)
 }
