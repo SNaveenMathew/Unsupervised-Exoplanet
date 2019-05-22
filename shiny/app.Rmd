@@ -12,8 +12,12 @@ library(keras)
 library(kerasR)
 library(png)
 library(grid)
+library(RSQLite)
 library(shinydashboard)
 library(glue)
+library(readr)
+library(imputeTS)
+source("../util.R")
 
 return_stars <- function(processed) {
   processed <- strsplit(processed, "_")
@@ -26,6 +30,17 @@ processed <- return_stars(processed)
 all_stars <- list.files("../data/", pattern = ".tbl", full.names = F)
 all_stars <- return_stars(all_stars)
 remaining <- setdiff(all_stars, processed)
+train_ratio <- 0.7
+
+
+sql_db_file <- "../exoplanet_db.sqlite"
+mydb <- dbConnect(RSQLite::SQLite(), sql_db_file)
+if(!dbExistsTable(conn = mydb, name = "user_star")) {
+dbGetQuery(mydb, "CREATE TABLE user_star (user_id varchar(64), kepler_id int, start int, end int);")
+}
+dbDisconnect(mydb)
+
+
 user_base <- data.frame(
   user = c("user1", "user2"),
   password = c("pass1", "pass2"), 
@@ -33,6 +48,9 @@ user_base <- data.frame(
   permissions = c("admin", "standard"),
   name = c("User One", "User Two")
 )
+
+
+
 int1 <- length(processed)
 style_text <- paste0("
         #kplr_id ~ .selectize-control .option:nth-child(-n+",
@@ -104,14 +122,67 @@ server = function(input, output) {
     }
   })
   
+  starts_ends <- reactive({
+    starts <- c()
+    ends <- c()
+    mydb <- dbConnect(RSQLite::SQLite(), sql_db_file)
+    username <- user_info()$name
+    id <- input$kplr_id
+    id <- as.integer(gsub(strsplit(id, "_")[[1]][1],
+                          pattern = "kplr", replacement = ""))
+    query <- paste0("SELECT * FROM user_star WHERE user_id='", username,
+                    "' AND kepler_id=", id, ";")
+    query_result <- dbGetQuery(mydb, query)
+    print(query)
+    if(nrow(query_result) == 0) {
+      mydb <- dbConnect(RSQLite::SQLite(), sql_db_file)
+      query <- paste0("SELECT * FROM test_idx WHERE id=", id, ";")
+      print(query)
+      query_result <- dbGetQuery(mydb, query)
+      if(nrow(query_result) > 0) {
+        starts <- query_result$start
+        ends <- query_result$end
+      } else {
+        starts <- 0
+        ends <- 0
+      }
+      # query <- paste0("SELECT * FROM test_idx WHERE id=", username, ";")
+      # query_result <- dbGetQuery(mydb, query)
+      # insert_query <- paste0("INSERT INTO user_star ('", username, "', ", id, ", 0, 0);")
+      # dbGetQuery(mydb, insert_query)
+    }
+    dbDisconnect(mydb)
+    return(list(starts = starts, ends = ends))
+  })
+  
   getImage <- reactive({
+    starts_ends <- starts_ends()
+    # print(starts_ends)
     if(!credentials()$user_auth) return(NULL)
-    files <- list.files("../plots/test_pred_plot/", pattern = input$kplr_id,
-                        full.names = T)
-    print(input$trainPlot_brush)
+    file <- list.files("../data/", pattern = input$kplr_id, full.names = T)
+    file <- file[1]
+    print(file)
+    wave <- get_wave(file, impute = F)
+    idx <- 1:floor(train_ratio * length(wave))
+    train <- wave[idx]
+    test <- wave[-idx]
+    temp_png <- png("temp_png.png", width = 1366, height = 768)
+    idx <- rep(FALSE, length(test))
+    if(length(starts_ends$starts) > 1) {
+      indices <- unlist(lapply(1:length(starts_ends$starts), function(i)
+        starts_ends$starts[i]:starts_ends$ends[i]))
+      idx[indices] <- T
+    }
+    plot(test, col = idx + 1)
+    dev.off()
+    files <- "temp_png.png"
+    # files <- list.files("../plots/test_pred_plot/", pattern = input$kplr_id,
+                        # full.names = T)
+    # print(input$trainPlot_brush)
     if(length(files) > 0) {
       file <- files[1]
       img <- readPNG(file)
+      file.remove("temp_png.png")
       return(grid.raster(img))
     } else {
       return(NULL)
