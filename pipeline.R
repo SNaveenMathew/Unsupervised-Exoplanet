@@ -119,6 +119,8 @@ run_pipeline <- function(data_dir = "data") {
       if(nrow(temp_train_idx_df) > 0) {
         temp_train_idx_df$id <- out_files1[i]
         temp_train_idx_df <- temp_train_idx_df[, c("id", "start", "end")]
+      } else {
+        temp_train_idx_df <- data.frame(id = out_files1, start = 0, end = 0)
       }
       train_idx_df <- rbind(train_idx_df, temp_train_idx_df)
       y_test_pred <- predict(model, x_test)
@@ -130,6 +132,8 @@ run_pipeline <- function(data_dir = "data") {
       if(nrow(temp_test_idx_df) > 0) {
         temp_test_idx_df$id <- out_files1[i]
         temp_test_idx_df <- temp_test_idx_df[, c("id", "start", "end")]
+      } else {
+        temp_test_idx_df <- data.frame(id = out_files1, start = 0, end = 0)
       }
       test_idx_df <- rbind(test_idx_df, temp_test_idx_df)
       tm1 <- Sys.time()
