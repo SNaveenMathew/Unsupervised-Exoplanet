@@ -6,3 +6,9 @@ data/*.tbl
 *.txt
 Papers/*
 lstm-synthetic-wave-anomaly-detect.py
+plots/*
+plots/*/*
+plots/*/*/*
+plots/*/*/*/*
+Report/*
+Presentation/*
