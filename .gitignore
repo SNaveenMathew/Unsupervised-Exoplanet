@@ -12,3 +12,5 @@ plots/*/*/*
 plots/*/*/*/*
 Report/*
 Presentation/*
+shiny/*
+exoplanet_db.sqlite
