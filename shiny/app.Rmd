@@ -6,10 +6,10 @@ runtime: shiny
 
 ```{r global, include = FALSE}
 # load data in 'global' chunk so it can be shared by all users of the dashboard
-reticulate::use_condaenv("tf_gpu")
-library(shinyauthr)
-library(keras)
-library(kerasR)
+# reticulate::use_condaenv("tf_gpu")
+# library(shinyauthr)
+# library(keras)
+# library(kerasR)
 library(png)
 library(grid)
 library(RSQLite)
@@ -146,16 +146,12 @@ server = function(input, output) {
         starts <- 0
         ends <- 0
       }
-      # query <- paste0("SELECT * FROM test_idx WHERE id=", username, ";")
-      # query_result <- dbGetQuery(mydb, query)
-      # insert_query <- paste0("INSERT INTO user_star ('", username, "', ", id, ", 0, 0);")
-      # dbGetQuery(mydb, insert_query)
     }
     dbDisconnect(mydb)
     return(list(starts = starts, ends = ends))
   })
   
-  getImage <- reactive({
+  get_data <- reactive({
     starts_ends <- starts_ends()
     # print(starts_ends)
     if(!credentials()$user_auth) return(NULL)
@@ -166,27 +162,19 @@ server = function(input, output) {
     idx <- 1:floor(train_ratio * length(wave))
     train <- wave[idx]
     test <- wave[-idx]
-    temp_png <- png("temp_png.png", width = 1366, height = 768)
+    # temp_png <- png("temp_png.png", width = 1366, height = 768)
     idx <- rep(FALSE, length(test))
     if(length(starts_ends$starts) > 1) {
       indices <- unlist(lapply(1:length(starts_ends$starts), function(i)
         starts_ends$starts[i]:starts_ends$ends[i]))
       idx[indices] <- T
     }
-    plot(test, col = idx + 1)
-    dev.off()
-    files <- "temp_png.png"
-    # files <- list.files("../plots/test_pred_plot/", pattern = input$kplr_id,
-                        # full.names = T)
-    # print(input$trainPlot_brush)
-    if(length(files) > 0) {
-      file <- files[1]
-      img <- readPNG(file)
-      file.remove("temp_png.png")
-      return(grid.raster(img))
-    } else {
-      return(NULL)
-    }
+    return(list(test = test, idx = idx))
+  })
+  
+  getImage <- reactive({
+    reqd_data <- get_data()
+    return(plot(reqd_data$test, col = reqd_data$idx + 1))
   })
   
   output$trainPlot <- renderPlot({
@@ -202,10 +190,46 @@ server = function(input, output) {
     return(glue("Welcome {user_info()$name}"))
   })
   
+  observeEvent(input$customize, {
+    username <- user_info()$name
+    print(username)
+    mydb <- dbConnect(RSQLite::SQLite(), sql_db_file)
+    id <- as.integer(gsub(strsplit(input$kplr_id, "_")[[1]][1],
+                          pattern = "kplr", replacement = ""))
+    delete_query <- paste0("DELETE FROM user_star WHERE user_id='", username,
+                           "' AND kepler_id=", id)
+    dbGetQuery(mydb, delete_query)
+    insert_query <- paste0("INSERT INTO user_star VALUES ('", username,
+                           "', ", id, ", 0, 0);")
+    dbExecute(mydb, insert_query)
+    dbDisconnect(mydb)
+    output$trainPlot <- renderPlot({
+      return(getImage())
+    })
+  })
+  
+  observeEvent(input$reset, {
+    username <- user_info()$name
+    print(username)
+    mydb <- dbConnect(RSQLite::SQLite(), sql_db_file)
+    id <- as.integer(gsub(strsplit(input$kplr_id, "_")[[1]][1],
+                          pattern = "kplr", replacement = ""))
+    delete_query <- paste0("DELETE FROM user_star WHERE user_id='", username,
+                           "' AND kepler_id=", id)
+    dbGetQuery(mydb, delete_query)
+    dbDisconnect(mydb)
+    output$trainPlot <- renderPlot({
+      return(getImage())
+    })
+  })
+  
   output$planet_page <- renderUI({
     req(credentials()$user_auth)
     return(fluidPage(
-      plotOutput("trainPlot", brush = brushOpts(id = "trainPlot_brush", direction = 'x'))
+      fluidRow(plotOutput("trainPlot", brush = brushOpts(id = "trainPlot_brush",
+                                                         direction = 'x')),
+               actionButton("customize", "Customize"),
+               actionButton("reset", "Reset to default"))
     ))
   })
 })
