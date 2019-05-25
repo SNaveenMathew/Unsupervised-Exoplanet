@@ -129,7 +129,7 @@ server = function(input, output) {
     }
   })
   
-  starts_ends <- reactive({
+  starts_ends_kplr_id <- eventReactive(input$kplr_id, {
     starts <- c()
     ends <- c()
     mydb <- dbConnect(RSQLite::SQLite(), sql_db_file)
@@ -158,8 +158,106 @@ server = function(input, output) {
     return(list(starts = starts, ends = ends))
   })
   
-  get_data <- reactive({
-    starts_ends <- starts_ends()
+  starts_ends_customize <- eventReactive(input$customize, {
+    starts <- c()
+    ends <- c()
+    mydb <- dbConnect(RSQLite::SQLite(), sql_db_file)
+    username <- user_info()$name
+    id <- input$kplr_id
+    id <- as.integer(gsub(strsplit(id, "_")[[1]][1],
+                          pattern = "kplr", replacement = ""))
+    query <- paste0("SELECT * FROM user_star WHERE user_id='", username,
+                    "' AND kepler_id=", id, ";")
+    query_result <- dbGetQuery(mydb, query)
+    if(nrow(query_result) == 0) {
+      print("No result in user_star query")
+      mydb <- dbConnect(RSQLite::SQLite(), sql_db_file)
+      query <- paste0("SELECT * FROM test_idx WHERE id=", id, ";")
+      query_result <- dbGetQuery(mydb, query)
+      if(nrow(query_result) > 0) {
+        starts <- query_result$start
+        ends <- query_result$end
+      } else {
+        print("No test_idx predicted by model")
+        starts <- 0
+        ends <- 0
+      }
+    }
+    dbDisconnect(mydb)
+    return(list(starts = starts, ends = ends))
+  })
+  
+  starts_ends_reset <- eventReactive(input$reset, {
+    starts <- c()
+    ends <- c()
+    mydb <- dbConnect(RSQLite::SQLite(), sql_db_file)
+    username <- user_info()$name
+    id <- input$kplr_id
+    id <- as.integer(gsub(strsplit(id, "_")[[1]][1],
+                          pattern = "kplr", replacement = ""))
+    query <- paste0("SELECT * FROM user_star WHERE user_id='", username,
+                    "' AND kepler_id=", id, ";")
+    query_result <- dbGetQuery(mydb, query)
+    if(nrow(query_result) == 0) {
+      print("No result in user_star query")
+      mydb <- dbConnect(RSQLite::SQLite(), sql_db_file)
+      query <- paste0("SELECT * FROM test_idx WHERE id=", id, ";")
+      query_result <- dbGetQuery(mydb, query)
+      if(nrow(query_result) > 0) {
+        starts <- query_result$start
+        ends <- query_result$end
+      } else {
+        print("No test_idx predicted by model")
+        starts <- 0
+        ends <- 0
+      }
+    }
+    dbDisconnect(mydb)
+    return(list(starts = starts, ends = ends))
+  })
+  
+  get_data_kplr_id <- reactive({
+    starts_ends <- starts_ends_kplr_id()
+    # print(starts_ends)
+    if(!credentials()$user_auth) return(NULL)
+    file <- list.files("data/", pattern = input$kplr_id, full.names = T)
+    file <- file[1]
+    wave <- get_wave(file, impute = F)
+    idx <- 1:floor(train_ratio * length(wave))
+    train <- wave[idx]
+    test <- wave[-idx]
+    # temp_png <- png("temp_png.png", width = 1366, height = 768)
+    idx <- rep(FALSE, length(test))
+    if(length(starts_ends$starts) > 1) {
+      indices <- unlist(lapply(1:length(starts_ends$starts), function(i)
+        starts_ends$starts[i]:starts_ends$ends[i]))
+      idx[indices] <- T
+    }
+    return(list(test = test, idx = idx))
+  })
+  
+  get_data_customize <- reactive({
+    starts_ends <- starts_ends_customize()
+    # print(starts_ends)
+    if(!credentials()$user_auth) return(NULL)
+    file <- list.files("data/", pattern = input$kplr_id, full.names = T)
+    file <- file[1]
+    wave <- get_wave(file, impute = F)
+    idx <- 1:floor(train_ratio * length(wave))
+    train <- wave[idx]
+    test <- wave[-idx]
+    # temp_png <- png("temp_png.png", width = 1366, height = 768)
+    idx <- rep(FALSE, length(test))
+    if(length(starts_ends$starts) > 1) {
+      indices <- unlist(lapply(1:length(starts_ends$starts), function(i)
+        starts_ends$starts[i]:starts_ends$ends[i]))
+      idx[indices] <- T
+    }
+    return(list(test = test, idx = idx))
+  })
+  
+  get_data_reset <- reactive({
+    starts_ends <- starts_ends_reset()
     # print(starts_ends)
     if(!credentials()$user_auth) return(NULL)
     file <- list.files("data/", pattern = input$kplr_id, full.names = T)
@@ -179,7 +277,7 @@ server = function(input, output) {
   })
   
   getImage <- reactive({
-    reqd_data <- get_data()
+    reqd_data <- get_data_kplr_id()
     return(plot(reqd_data$test, col = reqd_data$idx + 1))
   })
   
@@ -213,7 +311,7 @@ server = function(input, output) {
     dbDisconnect(mydb)
     output$trainPlot <- renderPlot({
       print("customize")
-      reqd_data <- get_data()
+      reqd_data <- get_data_customize()
       return(plot(reqd_data$test, col = reqd_data$idx + 1))
     })
   })
@@ -230,7 +328,7 @@ server = function(input, output) {
     dbDisconnect(mydb)
     output$trainPlot <- renderPlot({
       print("reset")
-      reqd_data <- get_data()
+      reqd_data <- get_data_reset()
       return(plot(reqd_data$test, col = reqd_data$idx + 1))
     })
   })
