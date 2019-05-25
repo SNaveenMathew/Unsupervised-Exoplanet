@@ -1,7 +1,14 @@
 ---
 title: "Exoplanet Candidate Dashboard"
-output: flexdashboard::flex_dashboard
+resource_files:
+- util.R
+- data/kplr001718189_q1_q16_tce_01_dvt_lc.tbl
+- data/kplr001872821_q1_q16_tce_01_dvt_lc.tbl
+- data/kplr001995732_q1_q16_tce_01_dvt_lc.tbl
+- data/kplr002307415_q1_q16_tce_01_dvt_lc.tbl
+- trained_models/kplr001872821_q1_q16_tce_01_dvt_lc.hdf5
 runtime: shiny
+output: flexdashboard::flex_dashboard
 ---
 
 ```{r global, include = FALSE}
@@ -17,7 +24,7 @@ library(shinydashboard)
 library(glue)
 library(readr)
 library(imputeTS)
-source("../util.R")
+source("util.R")
 
 return_stars <- function(processed) {
   processed <- strsplit(processed, "_")
@@ -25,15 +32,15 @@ return_stars <- function(processed) {
   return(processed)
 }
 
-processed <- list.files("../plots/test_pred_plot/", full.names = F)
+processed <- list.files("trained_models/", full.names = F)
 processed <- return_stars(processed)
-all_stars <- list.files("../data/", pattern = ".tbl", full.names = F)
+all_stars <- list.files("data/", pattern = ".tbl", full.names = F)
 all_stars <- return_stars(all_stars)
 remaining <- setdiff(all_stars, processed)
 train_ratio <- 0.7
 
 
-sql_db_file <- "../exoplanet_db.sqlite"
+sql_db_file <- "exoplanet_db.sqlite"
 mydb <- dbConnect(RSQLite::SQLite(), sql_db_file)
 if(!dbExistsTable(conn = mydb, name = "user_star")) {
 dbGetQuery(mydb, "CREATE TABLE user_star (user_id varchar(64), kepler_id int, start int, end int);")
@@ -133,16 +140,16 @@ server = function(input, output) {
     query <- paste0("SELECT * FROM user_star WHERE user_id='", username,
                     "' AND kepler_id=", id, ";")
     query_result <- dbGetQuery(mydb, query)
-    print(query)
     if(nrow(query_result) == 0) {
+      print("No result in user_star query")
       mydb <- dbConnect(RSQLite::SQLite(), sql_db_file)
       query <- paste0("SELECT * FROM test_idx WHERE id=", id, ";")
-      print(query)
       query_result <- dbGetQuery(mydb, query)
       if(nrow(query_result) > 0) {
         starts <- query_result$start
         ends <- query_result$end
       } else {
+        print("No test_idx predicted by model")
         starts <- 0
         ends <- 0
       }
@@ -155,9 +162,8 @@ server = function(input, output) {
     starts_ends <- starts_ends()
     # print(starts_ends)
     if(!credentials()$user_auth) return(NULL)
-    file <- list.files("../data/", pattern = input$kplr_id, full.names = T)
+    file <- list.files("data/", pattern = input$kplr_id, full.names = T)
     file <- file[1]
-    print(file)
     wave <- get_wave(file, impute = F)
     idx <- 1:floor(train_ratio * length(wave))
     train <- wave[idx]
@@ -177,8 +183,10 @@ server = function(input, output) {
     return(plot(reqd_data$test, col = reqd_data$idx + 1))
   })
   
-  output$trainPlot <- renderPlot({
-    return(getImage())
+  observeEvent(input$kplr_id, {
+    output$trainPlot <- renderPlot({
+      return(getImage())
+    })
   })
   
   user_info <- reactive({
@@ -204,7 +212,9 @@ server = function(input, output) {
     dbExecute(mydb, insert_query)
     dbDisconnect(mydb)
     output$trainPlot <- renderPlot({
-      return(getImage())
+      print("customize")
+      reqd_data <- get_data()
+      return(plot(reqd_data$test, col = reqd_data$idx + 1))
     })
   })
   
@@ -216,10 +226,12 @@ server = function(input, output) {
                           pattern = "kplr", replacement = ""))
     delete_query <- paste0("DELETE FROM user_star WHERE user_id='", username,
                            "' AND kepler_id=", id)
-    dbGetQuery(mydb, delete_query)
+    dbExecute(mydb, delete_query)
     dbDisconnect(mydb)
     output$trainPlot <- renderPlot({
-      return(getImage())
+      print("reset")
+      reqd_data <- get_data()
+      return(plot(reqd_data$test, col = reqd_data$idx + 1))
     })
   })
   
