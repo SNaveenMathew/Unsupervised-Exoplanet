@@ -14,7 +14,7 @@ run_pipeline <- function(data_dir = "data", seq_len = 10, train_ratio = 0.7,
   
   files <- list.files(path = paste0(data_dir, "/"), pattern = "*.tbl",
                       full.names = T)
-  if("kepler_star" %in% dbListTables(mydb)) {
+  if(!("kepler_star" %in% dbListTables(mydb))) {
     system("sh counts.sh")
     text <- system("sh counts_df.sh", intern = T)
     text <- t(sapply(strsplit(text, "\t"), function(elem) c(elem[1], elem[2])))
