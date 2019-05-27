@@ -1,3 +1,14 @@
+insert_into_db <- function(db_file, table_name, idx_df) {
+  mydb <- dbConnect(RSQLite::SQLite(), db_file)
+  insert_query <- apply(idx_df, 1, function(row)
+    paste0("('", row[1], "', ", row[2], ", ", row[3], ", ", row[4], ")"))
+  insert_query <- paste0(insert_query, collapse = ", ")
+  insert_query <- paste0("INSERT INTO ", table_name, " VALUES ", insert_query, ";")
+  dbGetQuery(mydb, insert_query)
+  dbDisconnect(mydb)
+}
+
+
 get_period_range <- function(wave) {
   lower <- 2
   upper <- floor(length(wave)/2)
