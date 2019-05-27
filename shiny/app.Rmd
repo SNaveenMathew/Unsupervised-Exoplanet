@@ -169,19 +169,13 @@ server = function(input, output) {
     query <- paste0("SELECT * FROM user_star WHERE user_id='", username,
                     "' AND kepler_id=", id, ";")
     query_result <- dbGetQuery(mydb, query)
-    if(nrow(query_result) == 0) {
-      print("No result in user_star query")
-      mydb <- dbConnect(RSQLite::SQLite(), sql_db_file)
-      query <- paste0("SELECT * FROM test_idx WHERE id=", id, ";")
-      query_result <- dbGetQuery(mydb, query)
-      if(nrow(query_result) > 0) {
-        starts <- query_result$start
-        ends <- query_result$end
-      } else {
-        print("No test_idx predicted by model")
-        starts <- 0
-        ends <- 0
-      }
+    if(nrow(query_result) > 0) {
+      starts <- query_result$start
+      ends <- query_result$end
+    } else {
+      print("No test_idx predicted by model")
+      starts <- 0
+      ends <- 0
     }
     dbDisconnect(mydb)
     return(list(starts = starts, ends = ends))
@@ -190,27 +184,20 @@ server = function(input, output) {
   starts_ends_reset <- eventReactive(input$reset, {
     starts <- c()
     ends <- c()
-    mydb <- dbConnect(RSQLite::SQLite(), sql_db_file)
     username <- user_info()$name
     id <- input$kplr_id
     id <- as.integer(gsub(strsplit(id, "_")[[1]][1],
                           pattern = "kplr", replacement = ""))
-    query <- paste0("SELECT * FROM user_star WHERE user_id='", username,
-                    "' AND kepler_id=", id, ";")
+    mydb <- dbConnect(RSQLite::SQLite(), sql_db_file)
+    query <- paste0("SELECT * FROM test_idx WHERE id=", id, ";")
     query_result <- dbGetQuery(mydb, query)
-    if(nrow(query_result) == 0) {
-      print("No result in user_star query")
-      mydb <- dbConnect(RSQLite::SQLite(), sql_db_file)
-      query <- paste0("SELECT * FROM test_idx WHERE id=", id, ";")
-      query_result <- dbGetQuery(mydb, query)
-      if(nrow(query_result) > 0) {
-        starts <- query_result$start
-        ends <- query_result$end
-      } else {
-        print("No test_idx predicted by model")
-        starts <- 0
-        ends <- 0
-      }
+    if(nrow(query_result) > 0) {
+      starts <- query_result$start
+      ends <- query_result$end
+    } else {
+      print("No test_idx predicted by model")
+      starts <- 0
+      ends <- 0
     }
     dbDisconnect(mydb)
     return(list(starts = starts, ends = ends))
