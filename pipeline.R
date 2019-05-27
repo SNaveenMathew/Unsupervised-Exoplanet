@@ -1,10 +1,8 @@
-run_pipeline <- function(data_dir = "data") {
-  unlink("exoplanet_db.sqlite")
-  mydb <- dbConnect(RSQLite::SQLite(), "exoplanet_db.sqlite")
-  seq_len <- 10
-  train_ratio <- 0.7
-  batch_size <- 50
-  epochs <- 10
+run_pipeline <- function(data_dir = "data", seq_len = 10, train_ratio = 0.7,
+                         batch_size = 50, epochs = 10, run_hrs = 8,
+                         db_file = "shiny/exoplanet_db.sqlite") {
+  # unlink("exoplanet_db.sqlite")
+  mydb <- dbConnect(RSQLite::SQLite(), db_file)
   shp <- c(seq_len - 1, 1)
   
   reduceLr <- callback_reduce_lr_on_plateau(
@@ -16,14 +14,16 @@ run_pipeline <- function(data_dir = "data") {
   
   files <- list.files(path = paste0(data_dir, "/"), pattern = "*.tbl",
                       full.names = T)
-  system("sh counts.sh")
-  text <- system("sh counts_df.sh", intern = T)
-  text <- t(sapply(strsplit(text, "\t"), function(elem) c(elem[1], elem[2])))
-  text <- data.frame(text, stringsAsFactors = F)
-  text$X1 <- as.integer(text$X1)
-  text$X2 <- as.numeric(text$X2)
-  colnames(text) = c("id", "num_planets")
-  dbWriteTable(mydb, "kepler_star", text)
+  if("kepler_star" %in% dbListTables(mydb)) {
+    system("sh counts.sh")
+    text <- system("sh counts_df.sh", intern = T)
+    text <- t(sapply(strsplit(text, "\t"), function(elem) c(elem[1], elem[2])))
+    text <- data.frame(text, stringsAsFactors = F)
+    text$X1 <- as.integer(text$X1)
+    text$X2 <- as.numeric(text$X2)
+    colnames(text) = c("id", "num_planets")
+    dbWriteTable(mydb, "kepler_star", text)
+  }
   out_files <- sapply(strsplit(files, "/"), function(strs) strs[length(strs)])
   out_files <- sapply(strsplit(out_files, "\\."), function(strs) strs[1])
   out_files1 <- sapply(strsplit(out_files, "_"), function(strs) strs[1])
@@ -44,7 +44,6 @@ run_pipeline <- function(data_dir = "data") {
   
   tm <- Sys.time()
   i <- 1
-  run_hrs <- 8
   diff_time <- 0
   metrics_df <- data.frame()
   train_idx_df <- data.frame()
@@ -148,8 +147,13 @@ run_pipeline <- function(data_dir = "data") {
   }
   
   metrics_df$file <- files[1:(i - 1)]
-  dbWriteTable(mydb, "train_idx", train_idx_df)
-  dbWriteTable(mydb, "test_idx", test_idx_df)
+  if(!("test_idx" %in% dbListTables(mydb))) {
+    dbWriteTable(mydb, "train_idx", train_idx_df)
+    dbWriteTable(mydb, "test_idx", test_idx_df)
+  } else {
+    insert_into_db(db_file, "train_idx", train_idx_df)
+    insert_into_db(db_file, "test_idx", test_idx_df)
+  }
   
   png("Presentation/example.png")
   wave <- get_wave(file)
