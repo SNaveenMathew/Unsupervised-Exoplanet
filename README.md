@@ -28,17 +28,28 @@ At the end of STAT 430 (Data Science Programming Methods) and ASTR 596 (AI in As
 
 There were several constraints during the execution of the project: in terms of resources and portability. Therefore, the code was tested only on 36 light curves. Manual observation of the light curves showed that the model had a good recall - it detected all exoplanet transits, but it had poor precision - there were many periodic false detections.
 
+## Areas covered (Updated 2019/06/05)
+
+- Shiny dashboard: [application link](https://snaveenmathew.shinyapps.io/unsupervised_exoplanet/).
+- SQLite database containing start and end indices of identified transits.
+- Image caching removed; images are generated on-the-fly from raw data and indices.
+- Customize button: creates a user-specific copy of the indices (blank by default). Editing option has not been added.
+- Reset button: removes user-specific copy and uses default model based indices.
+
+
 ## Areas to focus
 
-### Immediate (Updated 2019/05/07)
+### Immediate (Updated 2019/06/05)
 
-- Remove resource constraint - convert LSTM model training from CPU to GPU.
 - Implement astronomy based ideas to filter out false detections - eg: remove detections above the mean.
+- User access control.
 
-### Soon (Updated 2019/05/07)
+### Soon (Updated 2019/06/05)
 
 - Create a platform indepdent package in R that can run automatically.
     - Add R vignettes.
+- Bandit algorithm to provide visibility on quality of users and tags to refine the crowdsourcing.
+- Figure out reticulate issue in deployment of application on shinyapps.io.
 
 ### Maybe later (Updated 2019/05/07)
 

@@ -18,3 +18,4 @@ shiny/trained_models/*
 shiny/data/*.tbl
 shiny/util.R
 shiny/exoplanet_db.sqlite
+README.html
