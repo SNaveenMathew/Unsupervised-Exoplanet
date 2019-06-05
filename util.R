@@ -1,7 +1,12 @@
 insert_into_db <- function(db_file, table_name, idx_df) {
   mydb <- dbConnect(RSQLite::SQLite(), db_file)
-  insert_query <- apply(idx_df, 1, function(row)
-    paste0("('", row[1], "', ", row[2], ", ", row[3], ", ", row[4], ")"))
+  insert_query <- apply(idx_df, 1, function(row) {
+    if(length(row) == 4) {
+      return(paste0("('", row[1], "', ", row[2], ", ", row[3], ", ", row[4], ")"))
+    } else {
+      return(paste0("('", row[1], "', ", row[2], ", ", row[3], ")"))
+    }
+  })
   insert_query <- paste0(insert_query, collapse = ", ")
   insert_query <- paste0("INSERT INTO ", table_name, " VALUES ", insert_query, ";")
   dbGetQuery(mydb, insert_query)
@@ -78,10 +83,12 @@ split_train_test <- function(wave, train_ratio, seq_len) {
   test_arr <- t(sapply(1:(length(test_dat) - seq_len + 1),
                        function(i) return(test_dat[i:(i + seq_len - 1)])))
   x_train <- train_arr[, -ncol(train_arr)]
-  x_train <- array_reshape(x_train, dim = c(dim(x_train), 1))
+  # x_train <- array_reshape(x_train, dim = c(dim(x_train), 1))
+  dim(x_train) <- c(dim(x_train), 1)
   y_train <- train_arr[, ncol(train_arr)]
   x_test <- test_arr[, -ncol(test_arr)]
-  x_test <- array_reshape(x_test, dim = c(dim(x_test), 1))
+  # x_test <- array_reshape(x_test, dim = c(dim(x_test), 1))
+  dim(x_test) <- c(dim(x_test), 1)
   y_test <- test_arr[, ncol(test_arr)]
   return(list(x_train = x_train, y_train = y_train, x_test = x_test, y_test = y_test))
 }
@@ -128,7 +135,7 @@ save_plot <- function(y_pred, y, out_file, thr = NULL, lwr = NULL, upr = NULL) {
       all_diffs <- sapply(ends, function(end) starts-end)
       lst <- lapply(1:length(starts), function(i) starts[i]:ends[i])
       keeps <- apply(all_diffs, 1, function(row) {
-        return(any(between(x = abs(row), left = lwr, right = upr)))
+        return(any(data.table::between(x = abs(row), lower = lwr, upper = upr)))
       })
       indices <- unlist(lst[keeps])
       idx <- rep(FALSE, length(y))

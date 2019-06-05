@@ -7,14 +7,17 @@ resource_files:
 - data/kplr001995732_q1_q16_tce_01_dvt_lc.tbl
 - data/kplr002307415_q1_q16_tce_01_dvt_lc.tbl
 - trained_models/kplr001872821_q1_q16_tce_01_dvt_lc.hdf5
+- trained_models/kplr010074700_q1_q16_tce_01_dvt_lc.hdf5
+- data/kplr010074700_q1_q16_tce_01_dvt_lc.tbl
 runtime: shiny
 output: flexdashboard::flex_dashboard
 ---
 
 ```{r global, include = FALSE}
 # load data in 'global' chunk so it can be shared by all users of the dashboard
+# library(reticulate)
 # reticulate::use_condaenv("tf_gpu")
-# library(shinyauthr)
+library(shinyauthr)
 # library(keras)
 # library(kerasR)
 library(png)
@@ -38,6 +41,7 @@ all_stars <- list.files("data/", pattern = ".tbl", full.names = F)
 all_stars <- return_stars(all_stars)
 remaining <- setdiff(all_stars, processed)
 train_ratio <- 0.7
+seq_len <- 10
 
 
 sql_db_file <- "exoplanet_db.sqlite"
@@ -210,9 +214,9 @@ server = function(input, output) {
     file <- list.files("data/", pattern = input$kplr_id, full.names = T)
     file <- file[1]
     wave <- get_wave(file, impute = F)
-    idx <- 1:floor(train_ratio * length(wave))
-    train <- wave[idx]
-    test <- wave[-idx]
+    train_test_split <- split_train_test(wave, train_ratio, seq_len)
+    train <- train_test_split$y_train
+    test <- train_test_split$y_test
     # temp_png <- png("temp_png.png", width = 1366, height = 768)
     idx <- rep(FALSE, length(test))
     if(length(starts_ends$starts) > 1) {
@@ -230,9 +234,9 @@ server = function(input, output) {
     file <- list.files("data/", pattern = input$kplr_id, full.names = T)
     file <- file[1]
     wave <- get_wave(file, impute = F)
-    idx <- 1:floor(train_ratio * length(wave))
-    train <- wave[idx]
-    test <- wave[-idx]
+    train_test_split <- split_train_test(wave, train_ratio, seq_len)
+    train <- train_test_split$y_train
+    test <- train_test_split$y_test
     # temp_png <- png("temp_png.png", width = 1366, height = 768)
     idx <- rep(FALSE, length(test))
     if(length(starts_ends$starts) > 1) {
@@ -250,9 +254,9 @@ server = function(input, output) {
     file <- list.files("data/", pattern = input$kplr_id, full.names = T)
     file <- file[1]
     wave <- get_wave(file, impute = F)
-    idx <- 1:floor(train_ratio * length(wave))
-    train <- wave[idx]
-    test <- wave[-idx]
+    train_test_split <- split_train_test(wave, train_ratio, seq_len)
+    train <- train_test_split$y_train
+    test <- train_test_split$y_test
     # temp_png <- png("temp_png.png", width = 1366, height = 768)
     idx <- rep(FALSE, length(test))
     if(length(starts_ends$starts) > 1) {
