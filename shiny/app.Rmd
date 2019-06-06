@@ -18,6 +18,7 @@ output: flexdashboard::flex_dashboard
 # library(reticulate)
 # reticulate::use_condaenv("tf_gpu")
 library(shinyauthr)
+library(shinyBS)
 # library(keras)
 # library(kerasR)
 library(png)
@@ -329,8 +330,13 @@ server = function(input, output) {
     return(fluidPage(
       fluidRow(plotOutput("trainPlot", brush = brushOpts(id = "trainPlot_brush",
                                                          direction = 'x')),
-               actionButton("customize", "Customize"),
-               actionButton("reset", "Reset to default"))
+               bsButton("customize", label = "Customize", block = F),
+      bsTooltip(id = "customize", title = "Create a fresh user copy of light curve with blank exoplanet tags", placement = "right", trigger = "hover"),
+      bsButton("reset", label = "Reset to default", block = F),
+      bsTooltip(id = "reset", title = "Remove user copy (if exists) of light curve. Restore model-based exoplanet tags", placement = "right", trigger = "hover")
+               # actionButton("customize", "Customize"),
+               # actionButton("reset", "Reset to default")
+      )
     ))
   })
 })
