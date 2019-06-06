@@ -50,16 +50,10 @@ mydb <- dbConnect(RSQLite::SQLite(), sql_db_file)
 if(!dbExistsTable(conn = mydb, name = "user_star")) {
 dbGetQuery(mydb, "CREATE TABLE user_star (user_id varchar(64), kepler_id int, start int, end int);")
 }
+
+
+user_base <- dbGetQuery(mydb, "SELECT * FROM user_base;")
 dbDisconnect(mydb)
-
-
-user_base <- data.frame(
-  user = c("user1", "user2"),
-  password = c("pass1", "pass2"), 
-  password_hash = sapply(c("pass1", "pass2"), sodium::password_store), 
-  permissions = c("admin", "standard"),
-  name = c("User One", "User Two")
-)
 
 
 
