@@ -31,7 +31,7 @@ There were several constraints during the execution of the project: in terms of 
 ## Areas covered (Updated 2019/06/05)
 
 - Shiny dashboard: [application link](https://snaveenmathew.shinyapps.io/unsupervised_exoplanet/).
-- SQLite database containing start and end indices of identified transits.
+- SQLite database containing start and end indices of identified transits, user base with hashed password.
 - Image caching removed; images are generated on-the-fly from raw data and indices.
 - Customize button: creates a user-specific copy of the indices (blank by default). Editing option has not been added.
 - Reset button: removes user-specific copy and uses default model based indices.
