@@ -73,6 +73,14 @@ style_text <- paste0("
         }
 ")
 options <- c(processed, remaining)
+
+lgn <- shinyauthr::loginUI("login")
+chldrn <- lgn$children[[1]]$children
+btn <- chldrn[[4]]$children[[1]]
+btn$attribs$id = "signup-button"
+btn$children[[1]][[2]] <- "Create User"
+chldrn[[4]]$children[[2]] <- btn
+lgn$children[[1]]$children <- chldrn
 ```
 
 ```{r}
@@ -94,7 +102,9 @@ shinyApp(ui = dashboardPage(
   
   dashboardBody(
     shinyjs::useShinyjs(),
-    shinyauthr::loginUI("login"),
+    lgn,
+    # shinyauthr::loginUI("login"),
+    # div(uiOutput("new_user")),
     tags$head(
       tags$style(style_text)
     ),
@@ -127,6 +137,16 @@ server = function(input, output) {
                          choices = options, selected = options[1]))
     }
   })
+  
+  # output$new_user <- renderUI({
+  #   if(!(credentials()$user_auth)) {
+  #     return(actionButton("new_usr", "Create new user"))
+  #   }
+  # })
+  
+  # observeEvent(input$new_usr, {
+  #   print("Hi")
+  # })
   
   starts_ends_kplr_id <- eventReactive(input$kplr_id, {
     starts <- c()
