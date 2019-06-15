@@ -74,70 +74,6 @@ style_text <- paste0("
 ")
 options <- c(processed, remaining)
 
-lgn <- shinyauthr::loginUI(id = "login")
-chldrn <- lgn$children[[1]]$children
-btn <- chldrn[[4]]$children[[1]]
-btn$attribs$id = "login-signup"
-# btn$name <- "button1"
-btn$children[[1]][[2]] <- "Create User"
-chldrn[[4]]$children[[2]] <- btn
-lgn$children[[1]]$children <- chldrn
-
-
-loginPage <- function (input, output, session, data, user_col, pwd_col, sodium_hashed = FALSE,
-    hashed, algo, log_out = NULL)
-{
-    if (!missing(hashed)) {
-        stop("in shinyauthr::login module call. Argument hashed is deprecated. shinyauthr now uses the sodium package for password hashing and decryption. If you had previously hashed your passwords with the digest package to use with shinyauthr, please re-hash them with sodium and use the sodium_hashed argument instead for decryption to work. Sorry for this breaking change but sodium hashing provides added protection against brute-force attacks on stored passwords.",
-            call. = FALSE)
-    }
-    credentials <- shiny::reactiveValues(user_auth = FALSE, info = NULL)
-    shiny::observeEvent(log_out(), {
-        credentials$user_auth <- FALSE
-        credentials$info <- NULL
-        shiny::updateTextInput(session, "password", value = "")
-    })
-    shiny::observeEvent(credentials$user_auth, ignoreInit = TRUE,
-        {
-            shinyjs::toggle(id = "panel")
-        })
-    users <- dplyr::enquo(user_col)
-    pwds <- dplyr::enquo(pwd_col)
-    data <- dplyr::mutate_if(data, is.factor, as.character)
-    if (!sodium_hashed)
-        data <- dplyr::mutate(data, `:=`(!!pwds, sapply(!!pwds,
-            sodium::password_store)))
-    shiny::observeEvent(input$button, {
-        row_username <- which(dplyr::pull(data, !!users) == input$user_name)
-        if (length(row_username)) {
-            row_password <- dplyr::filter(data, dplyr::row_number() ==
-                row_username)
-            row_password <- dplyr::pull(row_password, !!pwds)
-            password_match <- sodium::password_verify(row_password,
-                input$password)
-        }
-        else {
-            password_match <- FALSE
-        }
-        if (length(row_username) == 1 && password_match) {
-            credentials$user_auth <- TRUE
-            credentials$info <- dplyr::filter(data, !!users ==
-                input$user_name)
-        }
-        else {
-            shinyjs::toggle(id = "error", anim = TRUE, time = 1,
-                animType = "fade")
-            shinyjs::delay(5000, shinyjs::toggle(id = "error",
-                anim = TRUE, time = 1, animType = "fade"))
-        }
-    })
-    shiny::observeEvent(input$signup, {
-      print("Hi")
-    })
-    shiny::reactive({
-        shiny::reactiveValuesToList(credentials)
-    })
-}
 ```
 
 ```{r}
@@ -159,9 +95,8 @@ shinyApp(ui = dashboardPage(
   
   dashboardBody(
     shinyjs::useShinyjs(),
-    lgn,
-    # shinyauthr::loginUI("login"),
-    # div(uiOutput("new_user")),
+    tabBox(tabPanel("Login", shinyauthr::loginUI(id = "login")),
+           tabPanel("Signup", p("Signup page"))),
     tags$head(
       tags$style(style_text)
     ),
@@ -174,8 +109,7 @@ server = function(input, output) {
                             reactive(credentials()$user_auth))
   
   credentials <- callModule(
-    # module = shinyauthr::login,
-    module = loginPage,
+    module = shinyauthr::login,
     id = "login", 
     data = user_base,
     user_col = user,
