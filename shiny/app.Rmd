@@ -95,8 +95,7 @@ shinyApp(ui = dashboardPage(
   
   dashboardBody(
     shinyjs::useShinyjs(),
-    tabBox(tabPanel("Login", shinyauthr::loginUI(id = "login")),
-           tabPanel("Signup", p("Signup page"))),
+    uiOutput("login_page"),
     tags$head(
       tags$style(style_text)
     ),
@@ -105,6 +104,7 @@ shinyApp(ui = dashboardPage(
 ),
 
 server = function(input, output) {
+  
   logout_init <- callModule(module = shinyauthr::logout, id = "logout",
                             reactive(credentials()$user_auth))
   
@@ -129,6 +129,32 @@ server = function(input, output) {
     if(credentials()$user_auth) {
       return(selectInput(inputId = "kplr_id", label = "Select Kepler ID:",
                          choices = options, selected = options[1]))
+    }
+  })
+  
+  observeEvent(input$signup, {
+    if(input$user == "") {
+      output$error <- renderText(return('<font color = "red"><b>Username cannot be blank!<b></font>'))
+    }
+    if(input$password == "") {
+      output$error <- renderText(return('<font color = "red"><b>Password cannot be blank!<b></font>'))
+    }
+    if(input$name == "") {
+      output$error <- renderText(return('<font color = "red"><b>Name cannot be empty!<b></font>'))
+    }
+    if(input$name != "" & input$password != "" & input$user != "") {
+      mydb <- dbConnect(RSQLite::SQLite(), sql_db_file)
+      user_base <- dbGetQuery(mydb, "SELECT * FROM user_base;")
+      dbDisconnect(mydb)
+      if(input$user %in% user_base$user) {
+        output$error <- renderText(return('<font color = "red"><b>Username already exists. Please enter a differnet username!<b></font>'))
+      } else {
+        passwd_hsh <- sodium::password_store(input$password)
+        insert_query <- paste0("INSERT INTO user_base VALUES('", input$user, "', '", passwd_hsh, "', '", input$permissions, "', '", input$name, "');")
+        mydb <- dbConnect(RSQLite::SQLite(), sql_db_file)
+        dbGetQuery(mydb, insert_query)
+        dbDisconnect(mydb)
+      }
     }
   })
   
@@ -336,6 +362,23 @@ server = function(input, output) {
                # actionButton("reset", "Reset to default")
       )
     ))
+  })
+  
+  output$login_page <- renderUI({
+    if(!credentials()$user_auth) {
+      return(
+        tabBox(tabPanel("Login", shinyauthr::loginUI(id = "login",
+                                                     title = "Login to access exoplanet dashboard")),
+               tabPanel("Signup", fluidPage(
+                 fluidRow(
+                   textInput(inputId = "user", label = "Username"),
+                   textInput(inputId = "name", "Name"),
+                   textInput(inputId = "password", label = "Password"),
+                   selectInput(inputId = "permissions", label = "Permissions", choices = c("admin", "standard"), selected = "standard"),
+                   actionButton(inputId = "signup", label = "Signup", icon = icon("user-plus")),
+                   uiOutput("error")
+                 )))))
+    }
   })
 })
 
