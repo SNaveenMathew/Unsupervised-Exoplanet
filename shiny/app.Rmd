@@ -48,7 +48,10 @@ seq_len <- 10
 sql_db_file <- "exoplanet_db.sqlite"
 mydb <- dbConnect(RSQLite::SQLite(), sql_db_file)
 if(!dbExistsTable(conn = mydb, name = "user_star")) {
-dbGetQuery(mydb, "CREATE TABLE user_star (user_id varchar(64), kepler_id int, start int, end int);")
+  dbGetQuery(mydb, "CREATE TABLE user_star (user_id varchar(64), kepler_id int, start int, end int);")
+}
+if(!dbExistsTable(conn = mydb, name = "user_base")) {
+  dbGetQuery(mydb, "CREATE TABLE user_base (user varchar(64), password_hash varchar(101), permissions varchar(9), name varchar(64), PRIMARY KEY(user));")
 }
 
 
@@ -154,8 +157,12 @@ server = function(input, output) {
         mydb <- dbConnect(RSQLite::SQLite(), sql_db_file)
         dbGetQuery(mydb, insert_query)
         dbDisconnect(mydb)
+        output$error <- renderText(return('<font color = "green"><b>Signup successful! Please refresh the page before attempting to login<b></font>'))
       }
     }
+    mydb <- dbConnect(RSQLite::SQLite(), sql_db_file)
+    user_base <<- dbGetQuery(mydb, "SELECT * FROM user_base;")
+    dbDisconnect(mydb)
   })
   
   starts_ends_kplr_id <- eventReactive(input$kplr_id, {
