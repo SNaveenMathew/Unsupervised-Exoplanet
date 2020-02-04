@@ -99,6 +99,7 @@ shinyApp(ui = dashboardPage(
   
   dashboardBody(
     shinyjs::useShinyjs(),
+    shinyjs::extendShinyjs(text = "shinyjs.refresh = function() { location.reload(); }"),
     uiOutput("login_page"),
     tags$head(
       tags$style(style_text)
@@ -164,6 +165,7 @@ server = function(input, output) {
     mydb <- dbConnect(RSQLite::SQLite(), sql_db_file)
     user_base <<- dbGetQuery(mydb, "SELECT * FROM user_base;")
     dbDisconnect(mydb)
+    shinyjs::js$refresh()
   })
   
   starts_ends_kplr_id <- eventReactive(input$kplr_id, {
