@@ -61,6 +61,7 @@ dbDisconnect(mydb)
 
 
 int1 <- length(processed)
+int1 <- (int1 == 0) * 1 + (int1 != 0) * int1
 style_text <- paste0("
         #kplr_id ~ .selectize-control .option:nth-child(-n+",
         as.character(int1),
