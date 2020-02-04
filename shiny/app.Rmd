@@ -138,6 +138,7 @@ server = function(input, output) {
   })
   
   observeEvent(input$signup, {
+    refresh <- F
     if(input$user == "") {
       output$error <- renderText(return('<font color = "red"><b>Username cannot be blank!<b></font>'))
     }
@@ -160,12 +161,15 @@ server = function(input, output) {
         dbGetQuery(mydb, insert_query)
         dbDisconnect(mydb)
         output$error <- renderText(return('<font color = "green"><b>Signup successful! Please refresh the page before attempting to login<b></font>'))
+        refresh <- T
       }
     }
     mydb <- dbConnect(RSQLite::SQLite(), sql_db_file)
     user_base <<- dbGetQuery(mydb, "SELECT * FROM user_base;")
     dbDisconnect(mydb)
-    shinyjs::js$refresh()
+    if(refresh) {
+      shinyjs::js$refresh()
+    }
   })
   
   starts_ends_kplr_id <- eventReactive(input$kplr_id, {
