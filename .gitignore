@@ -20,3 +20,13 @@ shiny/util.R
 shiny/exoplanet_db.sqlite
 README.html
 .Rproj.user
+.DS_Store
+*/.DS_Store
+*/*/.DS_Store
+*/*/*/.DS_Store
+*/*/*/*/.DS_Store
+.DS_Store/*
+*/.DS_Store/*
+*/*/.DS_Store/*
+*/*/*/.DS_Store/*
+*/*/*/*/.DS_Store/*
