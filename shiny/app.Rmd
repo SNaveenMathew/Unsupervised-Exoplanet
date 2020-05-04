@@ -30,15 +30,17 @@ library(readr)
 library(imputeTS)
 tryCatch({
   source("util.R")
-  sql_db_file <- "exoplanet_db.sqlite"
-  processed <- list.files("trained_models/", full.names = F)
-  all_stars <- list.files("data/", pattern = ".tbl", full.names = F)
+  sql_db_file <<- "exoplanet_db.sqlite"
+  processed <<- list.files("trained_models/", full.names = F)
+  all_stars <<- list.files("data/", pattern = ".tbl", full.names = F)
+  data_dir <<- "data/"
   
 }, error = function(e) {
   source("../util.R")
   sql_db_file <<- "../exoplanet_db.sqlite"
   processed <<- list.files("../trained_models/", full.names = F)
   all_stars <<- list.files("../data/", pattern = ".tbl", full.names = F)
+  data_dir <<- "../data/"
 })
 
 return_stars <- function(processed) {
@@ -258,7 +260,7 @@ server = function(input, output) {
     starts_ends <- starts_ends_kplr_id()
     # print(starts_ends)
     if(!credentials()$user_auth) return(NULL)
-    file <- list.files("data/", pattern = input$kplr_id, full.names = T)
+    file <- list.files(data_dir, pattern = input$kplr_id, full.names = T)
     file <- file[1]
     wave <- get_wave(file, impute = F)
     train_test_split <- split_train_test(wave, train_ratio, seq_len)
@@ -278,7 +280,7 @@ server = function(input, output) {
     starts_ends <- starts_ends_customize()
     # print(starts_ends)
     if(!credentials()$user_auth) return(NULL)
-    file <- list.files("data/", pattern = input$kplr_id, full.names = T)
+    file <- list.files(data_dir, pattern = input$kplr_id, full.names = T)
     file <- file[1]
     wave <- get_wave(file, impute = F)
     train_test_split <- split_train_test(wave, train_ratio, seq_len)
@@ -298,7 +300,7 @@ server = function(input, output) {
     starts_ends <- starts_ends_reset()
     # print(starts_ends)
     if(!credentials()$user_auth) return(NULL)
-    file <- list.files("data/", pattern = input$kplr_id, full.names = T)
+    file <- list.files(data_dir, pattern = input$kplr_id, full.names = T)
     file <- file[1]
     wave <- get_wave(file, impute = F)
     train_test_split <- split_train_test(wave, train_ratio, seq_len)
