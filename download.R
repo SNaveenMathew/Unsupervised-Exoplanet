@@ -8,7 +8,7 @@ if("remove_log.sh" %in% files & "Kepler_KOI_DV_wget.bat" %in% files) {
 
 setwd("data")
 
-files <- list.files()
-if(!("kplr010000162_q1_q16_tce_01_dvt_lc.tbl" %in% files)) {
+files <- list.files(pattern = ".tbl")
+if(length(files) == 0) {
   system("sh Kepler_KOI_DV_wget.bat")
 }
