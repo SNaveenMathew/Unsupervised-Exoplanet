@@ -28,7 +28,18 @@ library(shinydashboard)
 library(glue)
 library(readr)
 library(imputeTS)
-source("util.R")
+tryCatch({
+  source("util.R")
+  sql_db_file <- "exoplanet_db.sqlite"
+  processed <- list.files("trained_models/", full.names = F)
+  all_stars <- list.files("data/", pattern = ".tbl", full.names = F)
+  
+}, error = function(e) {
+  source("../util.R")
+  sql_db_file <<- "../exoplanet_db.sqlite"
+  processed <<- list.files("../trained_models/", full.names = F)
+  all_stars <<- list.files("../data/", pattern = ".tbl", full.names = F)
+})
 
 return_stars <- function(processed) {
   processed <- strsplit(processed, "_")
@@ -36,16 +47,13 @@ return_stars <- function(processed) {
   return(processed)
 }
 
-processed <- list.files("trained_models/", full.names = F)
 processed <- return_stars(processed)
-all_stars <- list.files("data/", pattern = ".tbl", full.names = F)
 all_stars <- return_stars(all_stars)
 remaining <- setdiff(all_stars, processed)
 train_ratio <- 0.7
 seq_len <- 10
 
 
-sql_db_file <- "exoplanet_db.sqlite"
 mydb <- dbConnect(RSQLite::SQLite(), sql_db_file)
 if(!dbExistsTable(conn = mydb, name = "user_star")) {
   dbGetQuery(mydb, "CREATE TABLE user_star (user_id varchar(64), kepler_id int, start int, end int);")
