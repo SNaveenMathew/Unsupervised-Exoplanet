@@ -269,15 +269,19 @@ server = function(input, output, session) {
       y_test <- split_res$y_test
       x_test <- split_res$x_test
       
-      mdl_file <- file.path("trained_models", paste0(out_base, ".hdf5"))
-      if(!file.exists(mdl_file)) {
-        mdl_file <- file.path("../trained_models", paste0(out_base, ".hdf5"))
-      }
+      # Check for star-specific model or global 1D-CNN autoencoder
+      mdl_candidates <- c(
+        file.path("trained_models", paste0(out_base, ".hdf5")),
+        file.path("../trained_models", paste0(out_base, ".hdf5")),
+        file.path("trained_models", "global_conv1d_autoencoder.hdf5"),
+        file.path("../trained_models", "global_conv1d_autoencoder.hdf5")
+      )
+      valid_mdl <- mdl_candidates[file.exists(mdl_candidates)][1]
       
       y_pred <- array(0, dim = dim(y_test))
-      if(file.exists(mdl_file) && requireNamespace("keras", quietly = TRUE)) {
+      if(!is.na(valid_mdl) && file.exists(valid_mdl) && requireNamespace("keras", quietly = TRUE)) {
         tryCatch({
-          model <- keras::load_model_hdf5(mdl_file)
+          model <- keras::load_model_hdf5(valid_mdl)
           y_pred <- predict(model, x_test, verbose = 0)
         }, error = function(e) NULL)
       }
