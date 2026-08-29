@@ -109,7 +109,7 @@ shinyApp(ui = dashboardPage(
   
   dashboardBody(
     shinyjs::useShinyjs(),
-    shinyjs::extendShinyjs(text = "shinyjs.refresh = function() { location.reload(); }"),
+    shinyjs::extendShinyjs(text = "shinyjs.refresh = function() { location.reload(); }", functions = c("refresh")),
     uiOutput("login_page"),
     tags$head(
       tags$style(style_text)
