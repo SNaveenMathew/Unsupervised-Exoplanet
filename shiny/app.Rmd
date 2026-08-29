@@ -34,13 +34,14 @@ tryCatch({
   processed <<- list.files("trained_models/", full.names = F)
   all_stars <<- list.files("data/", pattern = ".tbl", full.names = F)
   data_dir <<- "data/"
-  
+  plots_dir <<- "plots/test_pred_plot/"
 }, error = function(e) {
   source("../util.R")
   sql_db_file <<- "../exoplanet_db.sqlite"
   processed <<- list.files("../trained_models/", full.names = F)
   all_stars <<- list.files("../data/", pattern = ".tbl", full.names = F)
   data_dir <<- "../data/"
+  plots_dir <<- "../plots/test_pred_plot/"
 })
 
 return_stars <- function(processed) {
@@ -53,7 +54,7 @@ processed <- return_stars(processed)
 all_stars <- return_stars(all_stars)
 remaining <- setdiff(all_stars, processed)
 train_ratio <- 0.7
-seq_len <- 10
+seq_len <- 128
 
 
 mydb <- dbConnect(RSQLite::SQLite(), sql_db_file)
@@ -229,68 +230,85 @@ server = function(input, output, session) {
     return(list(starts = 0, ends = 0))
   })
   
-  get_data_kplr_id <- reactive({
-    starts_ends <- starts_ends_kplr_id()
-    if(!credentials()$user_auth) return(NULL)
-    file <- list.files(data_dir, pattern = input$kplr_id, full.names = T)
-    file <- file[1]
-    wave <- get_wave(file, impute = F)
-    train_test_split <- split_train_test(wave, train_ratio, seq_len)
-    train <- train_test_split$y_train
-    test <- train_test_split$y_test
-    idx <- rep(FALSE, length(test))
-    if(length(starts_ends$starts) > 1) {
-      indices <- unlist(lapply(1:length(starts_ends$starts), function(i)
-        starts_ends$starts[i]:starts_ends$ends[i]))
-      idx[indices] <- T
+  # Helper to load/generate and save plot on demand
+  render_star_plot <- function(kplr_id_val, custom_indices = NULL) {
+    if(!credentials()$user_auth || is.null(kplr_id_val) || kplr_id_val == "") return(NULL)
+    
+    file <- list.files(data_dir, pattern = kplr_id_val, full.names = TRUE)[1]
+    if(is.na(file) || !file.exists(file)) return(NULL)
+    
+    out_base <- tools::file_path_sans_ext(basename(file))
+    dir.create(plots_dir, showWarnings = FALSE, recursive = TRUE)
+    plot_file <- file.path(plots_dir, paste0(out_base, "_test_plot.png"))
+    
+    # If custom indices are passed (from customize/reset), render dynamically
+    if(!is.null(custom_indices)) {
+      raw_df <- read_kepler_table(file)
+      cleaned_df <- clean_light_curve(raw_df)
+      split_res <- split_train_test(cleaned_df, train_ratio = train_ratio, seq_len = seq_len)
+      test_vec <- as.vector(split_res$y_test)
+      idx_mask <- rep(FALSE, length(test_vec))
+      if(length(custom_indices$starts) > 0 && any(custom_indices$starts > 0)) {
+        for(j in seq_along(custom_indices$starts)) {
+          st <- custom_indices$starts[j]
+          en <- min(custom_indices$ends[j], length(test_vec))
+          if(st > 0 && en >= st) idx_mask[st:en] <- TRUE
+        }
+      }
+      plot(test_vec, col = ifelse(idx_mask, "red", "black"), pch = 20, cex = 0.5,
+           ylab = "Normalized Flux", xlab = "Cadence Index",
+           main = paste("Kepler Light Curve (Custom) -", out_base))
+      return(invisible(NULL))
     }
-    return(list(test = test, idx = idx))
-  })
-  
-  get_data_customize <- reactive({
-    starts_ends <- starts_ends_customize()
-    if(!credentials()$user_auth) return(NULL)
-    file <- list.files(data_dir, pattern = input$kplr_id, full.names = T)
-    file <- file[1]
-    wave <- get_wave(file, impute = F)
-    train_test_split <- split_train_test(wave, train_ratio, seq_len)
-    train <- train_test_split$y_train
-    test <- train_test_split$y_test
-    idx <- rep(FALSE, length(test))
-    if(length(starts_ends$starts) > 1) {
-      indices <- unlist(lapply(1:length(starts_ends$starts), function(i)
-        starts_ends$starts[i]:starts_ends$ends[i]))
-      idx[indices] <- T
+    
+    # If plot doesn't exist on disk, read .tbl file directly, reuse save_plot to generate and save
+    if(!file.exists(plot_file)) {
+      raw_df <- read_kepler_table(file)
+      cleaned_df <- clean_light_curve(raw_df)
+      split_res <- split_train_test(cleaned_df, train_ratio = train_ratio, seq_len = seq_len)
+      y_test <- split_res$y_test
+      x_test <- split_res$x_test
+      
+      mdl_file <- file.path("trained_models", paste0(out_base, ".hdf5"))
+      if(!file.exists(mdl_file)) {
+        mdl_file <- file.path("../trained_models", paste0(out_base, ".hdf5"))
+      }
+      
+      y_pred <- array(0, dim = dim(y_test))
+      if(file.exists(mdl_file) && requireNamespace("keras", quietly = TRUE)) {
+        tryCatch({
+          model <- keras::load_model_hdf5(mdl_file)
+          y_pred <- predict(model, x_test, verbose = 0)
+        }, error = function(e) NULL)
+      }
+      
+      # Reuse existing save_plot function to generate and store plot
+      detected_cands <- save_plot(y_pred = y_pred, y = y_test, out_file = plot_file)
+      
+      # If candidates detected, record them into test_idx if missing
+      star_id <- as.integer(gsub("^kplr([0-9]+).*", "\\1", out_base))
+      if(nrow(detected_cands) > 0 && is.finite(star_id)) {
+        detected_cands$id <- star_id
+        detected_cands <- detected_cands[, c("id", "start", "end")]
+        existing <- tryCatch({
+          dbGetQuery(db_conn, paste0("SELECT count(*) FROM test_idx WHERE id=", star_id, ";"))[1, 1]
+        }, error = function(e) 0)
+        if(is.na(existing) || existing == 0) {
+          dbWriteTable(db_conn, "test_idx", detected_cands, append = TRUE)
+        }
+      }
     }
-    return(list(test = test, idx = idx))
-  })
-  
-  get_data_reset <- reactive({
-    starts_ends <- starts_ends_reset()
-    if(!credentials()$user_auth) return(NULL)
-    file <- list.files(data_dir, pattern = input$kplr_id, full.names = T)
-    file <- file[1]
-    wave <- get_wave(file, impute = F)
-    train_test_split <- split_train_test(wave, train_ratio, seq_len)
-    train <- train_test_split$y_train
-    test <- train_test_split$y_test
-    idx <- rep(FALSE, length(test))
-    if(length(starts_ends$starts) > 1) {
-      indices <- unlist(lapply(1:length(starts_ends$starts), function(i)
-        starts_ends$starts[i]:starts_ends$ends[i]))
-      idx[indices] <- T
+    
+    # Display the plot from cached file
+    if(file.exists(plot_file)) {
+      img <- png::readPNG(plot_file)
+      grid::grid.raster(img)
     }
-    return(list(test = test, idx = idx))
-  })
-  
-  getImage <- reactive({
-    reqd_data <- get_data_kplr_id()
-    return(plot(reqd_data$test, col = reqd_data$idx + 1))
-  })
+  }
   
   observeEvent(input$kplr_id, {
     output$trainPlot <- renderPlot({
-      return(getImage())
+      render_star_plot(input$kplr_id)
     })
   })
   
@@ -314,8 +332,8 @@ server = function(input, output, session) {
                            "', ", id, ", 0, 0);")
     dbExecute(db_conn, insert_query)
     output$trainPlot <- renderPlot({
-      reqd_data <- get_data_customize()
-      return(plot(reqd_data$test, col = reqd_data$idx + 1))
+      custom_idx <- list(starts = 0, ends = 0)
+      render_star_plot(input$kplr_id, custom_indices = custom_idx)
     })
   })
   
@@ -327,8 +345,7 @@ server = function(input, output, session) {
                            "' AND kepler_id=", id)
     dbExecute(db_conn, delete_query)
     output$trainPlot <- renderPlot({
-      reqd_data <- get_data_reset()
-      return(plot(reqd_data$test, col = reqd_data$idx + 1))
+      render_star_plot(input$kplr_id)
     })
   })
   
