@@ -85,6 +85,10 @@ style_text <- paste0("
         ") {
           background-color: rgba(255,0,0,1);
         }
+
+        #login-panel {
+          display: block !important;
+        }
 ")
 options <- c(processed, remaining)
 
