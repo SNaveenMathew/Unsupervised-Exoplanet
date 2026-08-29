@@ -109,7 +109,6 @@ shinyApp(ui = dashboardPage(
   
   dashboardBody(
     shinyjs::useShinyjs(),
-    shinyjs::extendShinyjs(text = "shinyjs.refresh = function() { location.reload(); }", functions = c("refresh")),
     uiOutput("login_page"),
     tags$head(
       tags$style(style_text)
@@ -178,7 +177,7 @@ server = function(input, output) {
     user_base <<- dbGetQuery(mydb, "SELECT * FROM user_base;")
     dbDisconnect(mydb)
     if(refresh) {
-      shinyjs::js$refresh()
+      shinyjs::refresh()
     }
   })
   
