@@ -92,16 +92,20 @@ Unsupervised-Exoplanet/
 
 `pipeline.R` creates `plots/learning_curve`, `plots/train_pred_plot`, and `plots/test_pred_plot` (and `trained_models/`) if they do not already exist. Kepler `*.tbl` files are downloaded into `data/` by `download.R` / `data/Kepler_KOI_DV_wget.bat`.
 
-### Large plot PNGs (removed from git history)
+### Large files (removed from git history)
 
-Diagnostic PNGs produced by the pipeline were previously committed and bloated the repository. They have been purged from git history and are gitignored. Regenerate them locally by running `main.R`; do not commit them.
+Generated and course-material binaries were previously committed and bloated the repository. They have been purged from git history and are gitignored. Regenerate pipeline outputs locally by running `main.R`; do not commit them.
 
 | Path | What was stored |
 |------|-----------------|
 | `plots/learning_curve/` | LSTM learning-curve plots (`*_learning.png`) |
 | `plots/train_pred_plot/` | Training-set prediction plots (`*_train_plot.png`) |
-| `plots/test_pred_plot/` | Test-set prediction plots (`*_test_plot.png`); this was the largest set |
+| `plots/test_pred_plot/` | Test-set prediction plots (`*_test_plot.png`); this was the largest plot set |
 | repository root | A stray test plot, `kplr002302548_q1_q16_tce_02_dvt_lc_test_plot.png` |
+| `Presentation/` | Course slides, embedded HTML, GIFs, and example PNGs |
+| `Report/` | Course report PDF/LaTeX sources and figure PNGs |
+| `exoplanet_db.sqlite`, `shiny/exoplanet_db.sqlite` | SQLite databases of transit indices / users |
+| `README.html` | Rendered copy of this README |
 
 ## Contributing
 
