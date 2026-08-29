@@ -230,6 +230,70 @@ server = function(input, output, session) {
     return(list(starts = 0, ends = 0))
   })
   
+  # Reactive state for zoom boundaries
+  zoom_state <- reactiveValues(xlim = NULL)
+  
+  # Reset zoom when a different star is selected
+  observeEvent(input$kplr_id, {
+    zoom_state$xlim <- NULL
+  })
+  
+  # Zoom into current brush selection
+  observeEvent(input$zoom_brush, {
+    if(!is.null(input$trainPlot_brush)) {
+      st <- floor(max(1, input$trainPlot_brush$xmin))
+      en <- ceiling(input$trainPlot_brush$xmax)
+      if(en > st + 3) {
+        zoom_state$xlim <- c(st, en)
+      }
+    }
+  })
+  
+  # Zoom in (+50%)
+  observeEvent(input$zoom_in, {
+    req(input$kplr_id)
+    file <- list.files(data_dir, pattern = input$kplr_id, full.names = TRUE)[1]
+    if(!is.na(file) && file.exists(file)) {
+      raw_df <- read_kepler_table(file)
+      cleaned_df <- clean_light_curve(raw_df)
+      split_res <- split_train_test(cleaned_df, train_ratio = train_ratio, seq_len = seq_len)
+      tot_len <- length(split_res$y_test)
+      cur_lim <- if(is.null(zoom_state$xlim)) c(1, tot_len) else zoom_state$xlim
+      mid <- (cur_lim[1] + cur_lim[2]) / 2
+      half <- (cur_lim[2] - cur_lim[1]) / 4
+      if(half >= 3) {
+        zoom_state$xlim <- c(floor(max(1, mid - half)), ceiling(min(tot_len, mid + half)))
+      }
+    }
+  })
+  
+  # Zoom out (-50%)
+  observeEvent(input$zoom_out, {
+    req(input$kplr_id)
+    file <- list.files(data_dir, pattern = input$kplr_id, full.names = TRUE)[1]
+    if(!is.na(file) && file.exists(file)) {
+      raw_df <- read_kepler_table(file)
+      cleaned_df <- clean_light_curve(raw_df)
+      split_res <- split_train_test(cleaned_df, train_ratio = train_ratio, seq_len = seq_len)
+      tot_len <- length(split_res$y_test)
+      cur_lim <- if(is.null(zoom_state$xlim)) c(1, tot_len) else zoom_state$xlim
+      mid <- (cur_lim[1] + cur_lim[2]) / 2
+      half <- (cur_lim[2] - cur_lim[1])
+      new_st <- max(1, floor(mid - half))
+      new_en <- min(tot_len, ceiling(mid + half))
+      if(new_st <= 1 && new_en >= tot_len) {
+        zoom_state$xlim <- NULL
+      } else {
+        zoom_state$xlim <- c(new_st, new_en)
+      }
+    }
+  })
+  
+  # Reset zoom to full light curve
+  observeEvent(input$zoom_reset, {
+    zoom_state$xlim <- NULL
+  })
+  
   # Helper to load/generate and save plot on demand
   render_star_plot <- function(kplr_id_val, custom_indices = NULL) {
     if(!credentials()$user_auth || is.null(kplr_id_val) || kplr_id_val == "") return(NULL)
@@ -241,55 +305,33 @@ server = function(input, output, session) {
     dir.create(plots_dir, showWarnings = FALSE, recursive = TRUE)
     plot_file <- file.path(plots_dir, paste0(out_base, "_test_plot.png"))
     
-    # If custom indices are passed (from customize/reset), render dynamically
-    if(!is.null(custom_indices)) {
-      raw_df <- read_kepler_table(file)
-      cleaned_df <- clean_light_curve(raw_df)
-      split_res <- split_train_test(cleaned_df, train_ratio = train_ratio, seq_len = seq_len)
-      test_vec <- as.vector(split_res$y_test)
-      idx_mask <- rep(FALSE, length(test_vec))
-      if(length(custom_indices$starts) > 0 && any(custom_indices$starts > 0)) {
-        for(j in seq_along(custom_indices$starts)) {
-          st <- custom_indices$starts[j]
-          en <- min(custom_indices$ends[j], length(test_vec))
-          if(st > 0 && en >= st) idx_mask[st:en] <- TRUE
-        }
-      }
-      plot(test_vec, col = ifelse(idx_mask, "red", "black"), pch = 20, cex = 0.5,
-           ylab = "Normalized Flux", xlab = "Cadence Index",
-           main = paste("Kepler Light Curve (Custom) -", out_base))
-      return(invisible(NULL))
+    raw_df <- read_kepler_table(file)
+    cleaned_df <- clean_light_curve(raw_df)
+    split_res <- split_train_test(cleaned_df, train_ratio = train_ratio, seq_len = seq_len)
+    y_test <- split_res$y_test
+    x_test <- split_res$x_test
+    test_vec <- as.vector(y_test)
+    
+    # Model inference (or load cached model)
+    mdl_candidates <- c(
+      file.path("trained_models", paste0(out_base, ".hdf5")),
+      file.path("../trained_models", paste0(out_base, ".hdf5")),
+      file.path("trained_models", "global_conv1d_autoencoder.hdf5"),
+      file.path("../trained_models", "global_conv1d_autoencoder.hdf5")
+    )
+    valid_mdl <- mdl_candidates[file.exists(mdl_candidates)][1]
+    
+    y_pred <- array(0, dim = dim(y_test))
+    if(!is.na(valid_mdl) && file.exists(valid_mdl) && requireNamespace("keras", quietly = TRUE)) {
+      tryCatch({
+        model <- keras::load_model_hdf5(valid_mdl)
+        y_pred <- predict(model, x_test, verbose = 0)
+      }, error = function(e) NULL)
     }
     
-    # If plot doesn't exist on disk, read .tbl file directly, reuse save_plot to generate and save
+    # Ensure static plot file is saved for disk cache if not already existing
     if(!file.exists(plot_file)) {
-      raw_df <- read_kepler_table(file)
-      cleaned_df <- clean_light_curve(raw_df)
-      split_res <- split_train_test(cleaned_df, train_ratio = train_ratio, seq_len = seq_len)
-      y_test <- split_res$y_test
-      x_test <- split_res$x_test
-      
-      # Check for star-specific model or global 1D-CNN autoencoder
-      mdl_candidates <- c(
-        file.path("trained_models", paste0(out_base, ".hdf5")),
-        file.path("../trained_models", paste0(out_base, ".hdf5")),
-        file.path("trained_models", "global_conv1d_autoencoder.hdf5"),
-        file.path("../trained_models", "global_conv1d_autoencoder.hdf5")
-      )
-      valid_mdl <- mdl_candidates[file.exists(mdl_candidates)][1]
-      
-      y_pred <- array(0, dim = dim(y_test))
-      if(!is.na(valid_mdl) && file.exists(valid_mdl) && requireNamespace("keras", quietly = TRUE)) {
-        tryCatch({
-          model <- keras::load_model_hdf5(valid_mdl)
-          y_pred <- predict(model, x_test, verbose = 0)
-        }, error = function(e) NULL)
-      }
-      
-      # Reuse existing save_plot function to generate and store plot
       detected_cands <- save_plot(y_pred = y_pred, y = y_test, out_file = plot_file)
-      
-      # If candidates detected, record them into test_idx if missing
       star_id <- as.integer(gsub("^kplr([0-9]+).*", "\\1", out_base))
       if(nrow(detected_cands) > 0 && is.finite(star_id)) {
         detected_cands$id <- star_id
@@ -303,11 +345,53 @@ server = function(input, output, session) {
       }
     }
     
-    # Display the plot from cached file
-    if(file.exists(plot_file)) {
-      img <- png::readPNG(plot_file)
-      grid::grid.raster(img)
+    # Compute anomaly mask
+    if(!is.null(custom_indices)) {
+      idx_mask <- rep(FALSE, length(test_vec))
+      if(length(custom_indices$starts) > 0 && any(custom_indices$starts > 0)) {
+        for(j in seq_along(custom_indices$starts)) {
+          st <- custom_indices$starts[j]
+          en <- min(custom_indices$ends[j], length(test_vec))
+          if(st > 0 && en >= st) idx_mask[st:en] <- TRUE
+        }
+      }
+    } else {
+      det_res <- detect_transit_candidates(y_pred = y_pred, y = y_test)
+      idx_mask <- det_res$is_anomaly
     }
+    
+    # Determine xlim and dynamic ylim for active zoom
+    xlim <- if(is.null(zoom_state$xlim)) c(1, length(test_vec)) else zoom_state$xlim
+    sub_indices <- max(1, xlim[1]):min(length(test_vec), xlim[2])
+    sub_flux <- test_vec[sub_indices]
+    
+    if(length(sub_flux) > 0 && any(is.finite(sub_flux))) {
+      fl_min <- min(sub_flux, na.rm = TRUE)
+      fl_max <- max(sub_flux, na.rm = TRUE)
+      pad <- max(0.05 * (fl_max - fl_min), 0.001)
+      ylim <- c(fl_min - pad, fl_max + pad)
+    } else {
+      ylim <- NULL
+    }
+    
+    # Render interactive plot supporting zoom and brush
+    title_str <- paste("Kepler Light Curve -", out_base,
+                       if(!is.null(zoom_state$xlim)) sprintf("[Zoomed: %d - %d]", xlim[1], xlim[2]) else "")
+    
+    col_vec <- ifelse(idx_mask, "red", "black")
+    plot(x = seq_along(test_vec), y = test_vec, xlim = xlim, ylim = ylim,
+         col = col_vec, pch = 20, cex = if(!is.null(zoom_state$xlim)) 0.9 else 0.5,
+         ylab = "Normalized Flux", xlab = "Cadence Index",
+         main = title_str)
+    
+    pred_vec <- as.vector(y_pred)
+    if(length(pred_vec) == length(test_vec)) {
+      lines(x = seq_along(pred_vec), y = pred_vec, col = "dodgerblue", lwd = 1.5)
+    }
+    
+    legend("bottomleft", legend = c("Light Curve", "Transit Candidate Dip", "Autoencoder Baseline"),
+           col = c("black", "red", "dodgerblue"), pch = c(20, 20, NA), lty = c(NA, NA, 1),
+           lwd = c(NA, NA, 2), bg = "white")
   }
   
   observeEvent(input$kplr_id, {
@@ -356,12 +440,36 @@ server = function(input, output, session) {
   output$planet_page <- renderUI({
     req(credentials()$user_auth)
     return(fluidPage(
-      fluidRow(plotOutput("trainPlot", brush = brushOpts(id = "trainPlot_brush",
-                                                         direction = 'x')),
-               bsButton("customize", label = "Customize", block = F),
-      bsTooltip(id = "customize", title = "Create a fresh user copy of light curve with blank exoplanet tags", placement = "right", trigger = "hover"),
-      bsButton("reset", label = "Reset to default", block = F),
-      bsTooltip(id = "reset", title = "Remove user copy (if exists) of light curve. Restore model-based exoplanet tags", placement = "right", trigger = "hover")
+      fluidRow(
+        column(width = 12,
+          plotOutput("trainPlot", brush = brushOpts(id = "trainPlot_brush", direction = 'x'), height = "520px")
+        )
+      ),
+      br(),
+      fluidRow(
+        column(width = 12,
+          div(style = "display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 15px;",
+            bsButton("zoom_brush", label = " Zoom to Selection", icon = icon("search-plus"), style = "primary"),
+            bsTooltip(id = "zoom_brush", title = "Zoom into the range highlighted with the brush", placement = "top", trigger = "hover"),
+            
+            bsButton("zoom_in", label = " Zoom In (+)", icon = icon("plus"), style = "info"),
+            bsTooltip(id = "zoom_in", title = "Zoom in by 50%", placement = "top", trigger = "hover"),
+            
+            bsButton("zoom_out", label = " Zoom Out (-)", icon = icon("minus"), style = "info"),
+            bsTooltip(id = "zoom_out", title = "Zoom out by 50%", placement = "top", trigger = "hover"),
+            
+            bsButton("zoom_reset", label = " Reset Zoom", icon = icon("arrows-alt"), style = "default"),
+            bsTooltip(id = "zoom_reset", title = "Reset zoom to full light curve", placement = "top", trigger = "hover"),
+            
+            span(style = "margin-left: 15px; border-left: 2px solid #ddd; height: 32px; margin-right: 10px;"),
+            
+            bsButton("customize", label = "Customize", icon = icon("edit"), style = "warning"),
+            bsTooltip(id = "customize", title = "Create a fresh user copy of light curve with blank exoplanet tags", placement = "top", trigger = "hover"),
+            
+            bsButton("reset", label = "Reset Tags to Model", icon = icon("undo"), style = "danger"),
+            bsTooltip(id = "reset", title = "Remove user copy and restore model-based exoplanet tags", placement = "top", trigger = "hover")
+          )
+        )
       )
     ))
   })
