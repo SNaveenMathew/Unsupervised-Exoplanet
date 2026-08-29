@@ -1,14 +1,19 @@
+# Cross-platform Kepler bulk light curve downloader helper
+
 files <- list.files()
-if("remove_log.sh" %in% files & "Kepler_KOI_DV_wget.bat" %in% files) {
-  system("sh remove_log.sh")
-  dir.create("data", showWarnings = FALSE)
-  system("mv Kepler_KOI_DV_wget.bat data/")
-  system("mv remove_log.sh data/")
+dir.create("data", showWarnings = FALSE)
+
+if("remove_log.sh" %in% files) {
+  file.rename("remove_log.sh", "data/remove_log.sh")
 }
 
-setwd("data")
+if("Kepler_KOI_DV_wget.bat" %in% files) {
+  file.rename("Kepler_KOI_DV_wget.bat", "data/Kepler_KOI_DV_wget.bat")
+}
 
-files <- list.files(pattern = ".tbl")
-if(length(files) == 0) {
-  system("sh Kepler_KOI_DV_wget.bat")
+tbl_files <- list.files("data", pattern = "\\.tbl$")
+if(length(tbl_files) == 0) {
+  message("No .tbl files found in data/. To download light curves, execute data/Kepler_KOI_DV_wget.bat or wget.")
+} else {
+  message(sprintf("Found %d Kepler .tbl light curve files in data/.", length(tbl_files)))
 }
