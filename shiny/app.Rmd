@@ -121,7 +121,15 @@ shinyApp(ui = dashboardPage(
   )
 ),
 
-server = function(input, output) {
+server = function(input, output, session) {
+  
+  # Unified SQLite connection for the session, closed on session end
+  db_conn <- dbConnect(RSQLite::SQLite(), sql_db_file)
+  session$onSessionEnded(function() {
+    if(DBI::dbIsValid(db_conn)) {
+      DBI::dbDisconnect(db_conn)
+    }
+  })
   
   logout_init <- shinyauthr::logoutServer(
     id = "logout",
@@ -164,106 +172,65 @@ server = function(input, output) {
       output$error <- renderText(return('<font color = "red"><b>Name cannot be empty!<b></font>'))
     }
     if(input$name != "" & input$password != "" & input$user != "") {
-      mydb <- dbConnect(RSQLite::SQLite(), sql_db_file)
-      user_base <- dbGetQuery(mydb, "SELECT * FROM user_base;")
-      dbDisconnect(mydb)
-      if(input$user %in% user_base$user) {
+      current_users <- dbGetQuery(db_conn, "SELECT * FROM user_base;")
+      if(input$user %in% current_users$user) {
         output$error <- renderText(return('<font color = "red"><b>Username already exists. Please enter a differnet username!<b></font>'))
       } else {
         passwd_hsh <- sodium::password_store(input$password)
         insert_query <- paste0("INSERT INTO user_base VALUES('", input$user, "', '", passwd_hsh, "', '", input$permissions, "', '", input$name, "');")
-        mydb <- dbConnect(RSQLite::SQLite(), sql_db_file)
-        dbGetQuery(mydb, insert_query)
-        dbDisconnect(mydb)
+        dbExecute(db_conn, insert_query)
         output$error <- renderText(return('<font color = "green"><b>Signup successful! Please refresh the page before attempting to login<b></font>'))
         refresh <- T
       }
     }
-    mydb <- dbConnect(RSQLite::SQLite(), sql_db_file)
-    user_base <<- dbGetQuery(mydb, "SELECT * FROM user_base;")
-    dbDisconnect(mydb)
+    user_base <<- dbGetQuery(db_conn, "SELECT * FROM user_base;")
     if(refresh) {
       shinyjs::refresh()
     }
   })
   
-  starts_ends_kplr_id <- eventReactive(input$kplr_id, {
-    starts <- c()
-    ends <- c()
-    mydb <- dbConnect(RSQLite::SQLite(), sql_db_file)
-    username <- user_info()$name
-    id <- input$kplr_id
-    id <- as.integer(gsub(strsplit(id, "_")[[1]][1],
-                          pattern = "kplr", replacement = ""))
+  # Helper to retrieve candidate indices from user_star or test_idx
+  get_candidate_indices <- function(id, username) {
     query <- paste0("SELECT * FROM user_star WHERE user_id='", username,
                     "' AND kepler_id=", id, ";")
-    query_result <- dbGetQuery(mydb, query)
+    query_result <- dbGetQuery(db_conn, query)
     if(nrow(query_result) == 0) {
-      print("No result in user_star query")
-      mydb <- dbConnect(RSQLite::SQLite(), sql_db_file)
       query <- paste0("SELECT * FROM test_idx WHERE id=", id, ";")
-      query_result <- dbGetQuery(mydb, query)
-      if(nrow(query_result) > 0) {
-        starts <- query_result$start
-        ends <- query_result$end
-      } else {
-        print("No test_idx predicted by model")
-        starts <- 0
-        ends <- 0
-      }
+      query_result <- dbGetQuery(db_conn, query)
     }
-    dbDisconnect(mydb)
-    return(list(starts = starts, ends = ends))
+    if(nrow(query_result) > 0) {
+      return(list(starts = query_result$start, ends = query_result$end))
+    }
+    return(list(starts = 0, ends = 0))
+  }
+  
+  starts_ends_kplr_id <- eventReactive(input$kplr_id, {
+    username <- user_info()$name
+    id <- as.integer(gsub(strsplit(input$kplr_id, "_")[[1]][1],
+                          pattern = "kplr", replacement = ""))
+    return(get_candidate_indices(id, username))
   })
   
   starts_ends_customize <- eventReactive(input$customize, {
-    starts <- c()
-    ends <- c()
-    mydb <- dbConnect(RSQLite::SQLite(), sql_db_file)
     username <- user_info()$name
-    id <- input$kplr_id
-    id <- as.integer(gsub(strsplit(id, "_")[[1]][1],
+    id <- as.integer(gsub(strsplit(input$kplr_id, "_")[[1]][1],
                           pattern = "kplr", replacement = ""))
-    query <- paste0("SELECT * FROM user_star WHERE user_id='", username,
-                    "' AND kepler_id=", id, ";")
-    query_result <- dbGetQuery(mydb, query)
-    if(nrow(query_result) > 0) {
-      starts <- query_result$start
-      ends <- query_result$end
-    } else {
-      print("No test_idx predicted by model")
-      starts <- 0
-      ends <- 0
-    }
-    dbDisconnect(mydb)
-    return(list(starts = starts, ends = ends))
+    return(get_candidate_indices(id, username))
   })
   
   starts_ends_reset <- eventReactive(input$reset, {
-    starts <- c()
-    ends <- c()
-    username <- user_info()$name
-    id <- input$kplr_id
-    id <- as.integer(gsub(strsplit(id, "_")[[1]][1],
+    id <- as.integer(gsub(strsplit(input$kplr_id, "_")[[1]][1],
                           pattern = "kplr", replacement = ""))
-    mydb <- dbConnect(RSQLite::SQLite(), sql_db_file)
     query <- paste0("SELECT * FROM test_idx WHERE id=", id, ";")
-    query_result <- dbGetQuery(mydb, query)
+    query_result <- dbGetQuery(db_conn, query)
     if(nrow(query_result) > 0) {
-      starts <- query_result$start
-      ends <- query_result$end
-    } else {
-      print("No test_idx predicted by model")
-      starts <- 0
-      ends <- 0
+      return(list(starts = query_result$start, ends = query_result$end))
     }
-    dbDisconnect(mydb)
-    return(list(starts = starts, ends = ends))
+    return(list(starts = 0, ends = 0))
   })
   
   get_data_kplr_id <- reactive({
     starts_ends <- starts_ends_kplr_id()
-    # print(starts_ends)
     if(!credentials()$user_auth) return(NULL)
     file <- list.files(data_dir, pattern = input$kplr_id, full.names = T)
     file <- file[1]
@@ -271,7 +238,6 @@ server = function(input, output) {
     train_test_split <- split_train_test(wave, train_ratio, seq_len)
     train <- train_test_split$y_train
     test <- train_test_split$y_test
-    # temp_png <- png("temp_png.png", width = 1366, height = 768)
     idx <- rep(FALSE, length(test))
     if(length(starts_ends$starts) > 1) {
       indices <- unlist(lapply(1:length(starts_ends$starts), function(i)
@@ -283,7 +249,6 @@ server = function(input, output) {
   
   get_data_customize <- reactive({
     starts_ends <- starts_ends_customize()
-    # print(starts_ends)
     if(!credentials()$user_auth) return(NULL)
     file <- list.files(data_dir, pattern = input$kplr_id, full.names = T)
     file <- file[1]
@@ -291,7 +256,6 @@ server = function(input, output) {
     train_test_split <- split_train_test(wave, train_ratio, seq_len)
     train <- train_test_split$y_train
     test <- train_test_split$y_test
-    # temp_png <- png("temp_png.png", width = 1366, height = 768)
     idx <- rep(FALSE, length(test))
     if(length(starts_ends$starts) > 1) {
       indices <- unlist(lapply(1:length(starts_ends$starts), function(i)
@@ -303,7 +267,6 @@ server = function(input, output) {
   
   get_data_reset <- reactive({
     starts_ends <- starts_ends_reset()
-    # print(starts_ends)
     if(!credentials()$user_auth) return(NULL)
     file <- list.files(data_dir, pattern = input$kplr_id, full.names = T)
     file <- file[1]
@@ -311,7 +274,6 @@ server = function(input, output) {
     train_test_split <- split_train_test(wave, train_ratio, seq_len)
     train <- train_test_split$y_train
     test <- train_test_split$y_test
-    # temp_png <- png("temp_png.png", width = 1366, height = 768)
     idx <- rep(FALSE, length(test))
     if(length(starts_ends$starts) > 1) {
       indices <- unlist(lapply(1:length(starts_ends$starts), function(i)
@@ -343,19 +305,15 @@ server = function(input, output) {
   
   observeEvent(input$customize, {
     username <- user_info()$name
-    print(username)
-    mydb <- dbConnect(RSQLite::SQLite(), sql_db_file)
     id <- as.integer(gsub(strsplit(input$kplr_id, "_")[[1]][1],
                           pattern = "kplr", replacement = ""))
     delete_query <- paste0("DELETE FROM user_star WHERE user_id='", username,
                            "' AND kepler_id=", id)
-    dbGetQuery(mydb, delete_query)
+    dbExecute(db_conn, delete_query)
     insert_query <- paste0("INSERT INTO user_star VALUES ('", username,
                            "', ", id, ", 0, 0);")
-    dbExecute(mydb, insert_query)
-    dbDisconnect(mydb)
+    dbExecute(db_conn, insert_query)
     output$trainPlot <- renderPlot({
-      print("customize")
       reqd_data <- get_data_customize()
       return(plot(reqd_data$test, col = reqd_data$idx + 1))
     })
@@ -363,16 +321,12 @@ server = function(input, output) {
   
   observeEvent(input$reset, {
     username <- user_info()$name
-    print(username)
-    mydb <- dbConnect(RSQLite::SQLite(), sql_db_file)
     id <- as.integer(gsub(strsplit(input$kplr_id, "_")[[1]][1],
                           pattern = "kplr", replacement = ""))
     delete_query <- paste0("DELETE FROM user_star WHERE user_id='", username,
                            "' AND kepler_id=", id)
-    dbExecute(mydb, delete_query)
-    dbDisconnect(mydb)
+    dbExecute(db_conn, delete_query)
     output$trainPlot <- renderPlot({
-      print("reset")
       reqd_data <- get_data_reset()
       return(plot(reqd_data$test, col = reqd_data$idx + 1))
     })
@@ -387,8 +341,6 @@ server = function(input, output) {
       bsTooltip(id = "customize", title = "Create a fresh user copy of light curve with blank exoplanet tags", placement = "right", trigger = "hover"),
       bsButton("reset", label = "Reset to default", block = F),
       bsTooltip(id = "reset", title = "Remove user copy (if exists) of light curve. Restore model-based exoplanet tags", placement = "right", trigger = "hover")
-               # actionButton("customize", "Customize"),
-               # actionButton("reset", "Reset to default")
       )
     ))
   })
