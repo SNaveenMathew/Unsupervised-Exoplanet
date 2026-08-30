@@ -28,7 +28,10 @@ library(RSQLite)
 library(shinydashboard)
 library(glue)
 library(readr)
-library(imputeTS)
+# NOTE: imputeTS was a leftover import from the old Stineman-interpolation
+# preprocessing pipeline (see README) and is not called anywhere in this
+# file or in util.R (which does its own gap-aware cleaning). Dropped so
+# the app does not require an extra, unused dependency to start.
 tryCatch({
   source("util.R")
   sql_db_file <<- "exoplanet_db.sqlite"
@@ -249,6 +252,181 @@ build_phase_fold_plotly <- function(res) {
   return(p)
 }
 
+# ---------------------------------------------------------------------
+# Bandit-style star selector (Thompson Sampling over tagging agreement)
+# ---------------------------------------------------------------------
+# Goal: given the user_star (per-user tags) and test_idx (model-detected
+# candidates) tables already queried elsewhere in this file, recommend
+# which star most needs another set of eyes on it - i.e. stars that are
+# under-tagged (few/no users have looked at them) or where taggers
+# disagree with each other.
+#
+# Why Thompson Sampling rather than a plain epsilon-greedy or UCB1 rule:
+#   - Epsilon-greedy explores uniformly at random a fixed fraction of the
+#     time, regardless of how much evidence already exists for a star. It
+#     can't tell "nobody has tagged this yet" apart from "everybody
+#     agrees on this", so it wastes exploration on already-settled stars.
+#   - UCB1 is deterministic given the current table state: every session
+#     that asks "what should I tag next?" gets back the exact same star.
+#     This dashboard is a live, multi-user Shiny app - several people can
+#     hit the selector within the same minute - so a deterministic rule
+#     would pile everyone onto one star while the rest of the backlog
+#     goes untouched.
+#   - Thompson Sampling instead treats each star as a Beta-Bernoulli arm
+#     and draws a fresh random sample from its posterior every time a
+#     recommendation is requested. That randomness spreads concurrent
+#     users across several high-priority stars instead of colliding on
+#     one, while still concentrating probability mass on stars that most
+#     need attention - and it does so without a hand-tuned exploration
+#     rate, since "no data yet" already IS maximum uncertainty under a
+#     Beta(1, 1) prior.
+#
+# Arm / reward definition: pulling a star's arm = showing it to a tagger;
+# "reward" = 1 if that tagger's windows would disagree with the existing
+# consensus, 0 if they'd agree. We don't have that outcome ahead of time,
+# so instead of waiting on a live feedback loop we approximate the
+# posterior directly, live, from the tags already on file:
+#   - >= 2 human taggers: reward posterior is built from the mean
+#     pairwise agreement (IoU) across every pair of taggers' saved
+#     windows, weighted by how many pairs that mean is based on.
+#   - exactly 1 human tagger: compared against the model's own
+#     test_idx detection as a (weaker) second opinion.
+#   - 0 human taggers: no evidence at all -> uniform Beta(1, 1), i.e.
+#     maximum uncertainty, which is exactly what should invite a look.
+
+# Merges a list of c(start, end) windows into a minimal sorted, non
+# overlapping set (adjacent/overlapping windows combined).
+merge_windows <- function(windows) {
+  if (length(windows) == 0) return(list())
+  mat <- do.call(rbind, windows)
+  mat <- mat[order(mat[, 1]), , drop = FALSE]
+  merged <- list(as.numeric(mat[1, ]))
+  if (nrow(mat) > 1) {
+    for (i in 2:nrow(mat)) {
+      last <- merged[[length(merged)]]
+      if (mat[i, 1] <= last[2] + 1) {
+        merged[[length(merged)]][2] <- max(last[2], mat[i, 2])
+      } else {
+        merged[[length(merged) + 1]] <- as.numeric(mat[i, ])
+      }
+    }
+  }
+  merged
+}
+
+# Total number of cadence indices covered by a (merged) window set
+windows_length <- function(windows) {
+  if (length(windows) == 0) return(0)
+  sum(vapply(windows, function(w) w[2] - w[1] + 1, numeric(1)))
+}
+
+# Total overlap length between two (merged) window sets
+windows_intersection_length <- function(a, b) {
+  if (length(a) == 0 || length(b) == 0) return(0)
+  total <- 0
+  for (wa in a) {
+    for (wb in b) {
+      lo <- max(wa[1], wb[1]); hi <- min(wa[2], wb[2])
+      if (hi >= lo) total <- total + (hi - lo + 1)
+    }
+  }
+  total
+}
+
+# Jaccard/IoU agreement between two taggers' window sets, in [0, 1].
+# Two taggers who both explicitly found nothing (both empty) are defined
+# to fully agree; one empty and one non-empty fully disagree.
+windows_iou <- function(windows_a, windows_b) {
+  a <- merge_windows(windows_a)
+  b <- merge_windows(windows_b)
+  len_a <- windows_length(a); len_b <- windows_length(b)
+  if (len_a == 0 && len_b == 0) return(1)
+  inter <- windows_intersection_length(a, b)
+  union_len <- len_a + len_b - inter
+  if (union_len <= 0) return(1)
+  inter / union_len
+}
+
+# All human-tagged window sets for a star, one entry per user_id, using
+# the same (0,0)-placeholder-drops-to-empty-set convention as
+# indices_to_windows() elsewhere in this file.
+get_star_human_tag_sets <- function(db_conn, kepler_id) {
+  rows <- dbGetQuery(db_conn, "SELECT user_id, start, end FROM user_star WHERE kepler_id = ?;",
+                      params = list(kepler_id))
+  if (nrow(rows) == 0) return(list())
+  by_user <- split(rows, rows$user_id)
+  lapply(by_user, function(df) indices_to_windows(list(starts = df$start, ends = df$end)))
+}
+
+# The model's own detected windows for a star (test_idx), or NULL if the
+# table doesn't exist yet or has no rows for this star.
+get_star_model_tag_set <- function(db_conn, kepler_id) {
+  if (!dbExistsTable(db_conn, "test_idx")) return(NULL)
+  rows <- dbGetQuery(db_conn, "SELECT start, end FROM test_idx WHERE id = ?;",
+                      params = list(kepler_id))
+  if (nrow(rows) == 0) return(NULL)
+  indices_to_windows(list(starts = rows$start, ends = rows$end))
+}
+
+# Live Beta-Bernoulli pseudo-counts for one star's "needs more tagging"
+# arm, derived from whatever tags currently exist for it.
+compute_star_bandit_stats <- function(db_conn, kepler_id) {
+  human_sets <- get_star_human_tag_sets(db_conn, kepler_id)
+  n_human <- length(human_sets)
+
+  if (n_human >= 2) {
+    pairs <- utils::combn(seq_len(n_human), 2, simplify = FALSE)
+    ious <- vapply(pairs, function(p) windows_iou(human_sets[[p[1]]], human_sets[[p[2]]]), numeric(1))
+    mean_agree <- mean(ious)
+    n_pairs <- length(ious)
+    tag_source <- "human-human"
+  } else if (n_human == 1) {
+    model_set <- get_star_model_tag_set(db_conn, kepler_id)
+    if (!is.null(model_set)) {
+      mean_agree <- windows_iou(human_sets[[1]], model_set)
+      n_pairs <- 0.5  # model-vs-human is a weaker signal than human-vs-human
+      tag_source <- "human-model"
+    } else {
+      mean_agree <- 0.5
+      n_pairs <- 0
+      tag_source <- "single-tagger"
+    }
+  } else {
+    mean_agree <- 0.5
+    n_pairs <- 0
+    tag_source <- "cold-start"
+  }
+
+  list(n_human = n_human, mean_agree = mean_agree, n_pairs = n_pairs, source = tag_source,
+       alpha_disagree = 1 + n_pairs * (1 - mean_agree),  # Beta "successes" = disagreement
+       alpha_agree = 1 + n_pairs * mean_agree)            # Beta "failures" = agreement
+}
+
+# One Thompson-Sampling draw from a star's posterior "needs more tagging"
+# probability. Called fresh (new random draw) every time a pick is made.
+sample_star_priority <- function(star_stats) {
+  stats::rbeta(1, star_stats$alpha_disagree, star_stats$alpha_agree)
+}
+
+# Ranks every star in `star_options` (dropdown-format strings, e.g.
+# "kplr001718189") by a fresh Thompson-Sampling draw. Returns a data
+# frame sorted with the recommended star first.
+rank_stars_by_bandit <- function(db_conn, star_options) {
+  ids <- vapply(star_options, function(s) as.integer(gsub("^kplr", "", strsplit(s, "_")[[1]][1])), integer(1))
+  stats_list <- lapply(ids, function(id) compute_star_bandit_stats(db_conn, id))
+  samples <- vapply(stats_list, sample_star_priority, numeric(1))
+  out <- data.frame(
+    star = star_options,
+    kepler_id = ids,
+    n_human = vapply(stats_list, `[[`, integer(1), "n_human"),
+    mean_agree = vapply(stats_list, `[[`, numeric(1), "mean_agree"),
+    source = vapply(stats_list, `[[`, character(1), "source"),
+    priority_sample = samples,
+    stringsAsFactors = FALSE
+  )
+  out[order(-out$priority_sample), ]
+}
+
 processed <- return_stars(processed)
 all_stars <- return_stars(all_stars)
 remaining <- setdiff(all_stars, processed)
@@ -309,7 +487,14 @@ shinyApp(ui = dashboardPage(
   
   dashboardSidebar(collapsed = T,
     div(textOutput("welcome"), style = "padding: 20px"),
-    div(uiOutput("kplr_id"))
+    div(uiOutput("kplr_id")),
+    div(style = "padding: 0 15px 8px 15px;", uiOutput("star_priority_badge")),
+    div(style = "padding: 0 15px 15px 15px;",
+        bsButton("bandit_suggest", label = " Suggest Next Star", icon = icon("dice"), style = "primary", block = TRUE),
+        bsTooltip(id = "bandit_suggest",
+                  title = "Thompson-sampling bandit: jumps to a star that's under-tagged or has low agreement among taggers so far",
+                  placement = "right", trigger = "hover")
+    )
   ),
   
   dashboardBody(
@@ -359,6 +544,46 @@ server = function(input, output, session) {
       return(selectInput(inputId = "kplr_id", label = "Select Kepler ID:",
                          choices = options, selected = options[1]))
     }
+  })
+  
+  # Live "does this star need more tagging?" readout for whichever star is
+  # currently selected. Uses the posterior MEAN (not a fresh random draw)
+  # so the badge doesn't visibly flicker on every re-render - only the
+  # "Suggest Next Star" button below draws a fresh Thompson sample.
+  output$star_priority_badge <- renderUI({
+    req(credentials()$user_auth, input$kplr_id)
+    tag_save_trigger()
+    st <- compute_star_bandit_stats(db_conn, current_star_id())
+    label <- switch(st$source,
+      "cold-start"    = "Not tagged by anyone yet",
+      "single-tagger" = "Tagged by 1 user so far",
+      "human-model"   = sprintf("1 user \u2014 %.0f%% match with model detection", 100 * st$mean_agree),
+      "human-human"   = sprintf("%d users \u2014 %.0f%% pairwise agreement", st$n_human, 100 * st$mean_agree))
+    priority_mean <- st$alpha_disagree / (st$alpha_disagree + st$alpha_agree)
+    tier <- if (priority_mean > 0.6) "High priority" else if (priority_mean > 0.35) "Medium priority" else "Low priority"
+    color <- if (priority_mean > 0.6) "#dc2626" else if (priority_mean > 0.35) "#d97706" else "#16a34a"
+    div(style = "font-size: 0.8em; color: #ccc;",
+        span(style = paste0("display:inline-block; padding:2px 8px; border-radius:10px; background:",
+                             color, "; color:white; font-weight:bold;"), tier),
+        div(style = "margin-top:4px;", label)
+    )
+  })
+  
+  # Thompson-Sampling star recommendation: draws one fresh sample per star
+  # from compute_star_bandit_stats() and jumps the dropdown to whichever
+  # star that sample favors.
+  observeEvent(input$bandit_suggest, {
+    req(credentials()$user_auth)
+    ranked <- rank_stars_by_bandit(db_conn, options)
+    pick <- ranked[1, ]
+    updateSelectInput(session, "kplr_id", selected = pick$star)
+    msg <- if (pick$n_human == 0) {
+      sprintf("Suggested %s \u2014 no one has tagged it yet.", pick$star)
+    } else {
+      sprintf("Suggested %s \u2014 tagged by %d user(s), ~%.0f%% agreement so far.",
+              pick$star, pick$n_human, 100 * pick$mean_agree)
+    }
+    showNotification(msg, type = "message", duration = 6)
   })
   
   observeEvent(input$signup, {
@@ -441,6 +666,11 @@ server = function(input, output, session) {
   # currently selected star; NULL until "Verify Period (BLS)" is run, and
   # cleared whenever a different star is selected.
   bls_result <- reactiveVal(NULL)
+  
+  # Bumped whenever a tagging change is saved (confirm/reset) so the
+  # star-priority badge recomputes; the bandit "Suggest" button always
+  # recomputes live on click regardless of this trigger.
+  tag_save_trigger <- reactiveVal(0)
   
   output$tag_window_summary <- renderText({
     w <- tag_windows()
@@ -564,6 +794,7 @@ server = function(input, output, session) {
     tag_mode(FALSE)
     tag_windows(list())
     refresh_saved_indices()
+    tag_save_trigger(isolate(tag_save_trigger()) + 1)
     showNotification(paste0("Saved ", length(windows), " tagged window(s)."), type = "message")
   })
   
@@ -667,6 +898,7 @@ server = function(input, output, session) {
     tag_mode(FALSE)
     tag_windows(list())
     refresh_saved_indices()
+    tag_save_trigger(isolate(tag_save_trigger()) + 1)
   })
   
   # Single reactive plot: reads input$kplr_id, zoom_state$xlim and tag_mode()
