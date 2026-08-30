@@ -46,6 +46,11 @@ There were several constraints during the execution of the project: in terms of 
 - **Cross-Platform Native R Execution**: Eliminated external shell script dependencies (`counts.sh`, `counts_df.sh`) for native Kepler star parsing and database population across Windows and Linux.
 - **On-Demand Plotting & Model Inference**: The Shiny app generates and caches light curve plots directly from raw `.tbl` files upon user selection if not pre-generated, running inference via star-specific or global autoencoder models and storing the rendered plots in `plots/test_pred_plot/` for future instant loading.
 - **Session-Scoped Database Lifecycle**: Unified SQLite connections into a single session-scoped connection with automatic cleanup on session termination.
+- **Interactive Plotly Manual Tagging**: Replaced the old "Customize" (blank placeholder row, no editing) / "Reset" pair with a full tagging session workflow. "Edit Tags" pre-loads a star's saved windows and "Start Blank" begins empty; drag-selecting a range and clicking "Fix Brush as Window" adds a candidate interval, "Undo Last Window" removes the most recent one, and fixed windows render as translucent, edge-draggable/resizable shapes directly on the plot. Nothing is written to `user_star` until "Confirm Tags"; "Cancel" discards the session untouched. "Reset Tags to Model" still reverts a star to model-detected candidates immediately.
+- **Zoom & Pan Controls**: Added "Zoom to Selection" (zoom into a drag-selected range), "Zoom In" / "Zoom Out" (±50% around the current center), and "Reset Zoom", with y-axis limits recomputed dynamically for whichever window is visible.
+- **Global Model Fallback + `test_idx` Cache**: When a star has no dedicated `.hdf5` model, inference now falls back to a shared `global_conv1d_autoencoder.hdf5`. Model-detected candidate windows are persisted once per star into a new `test_idx` table and reused across sessions instead of being recomputed on every view; per-user overrides still live in `user_star`.
+- **Graceful Keras/Reticulate Degradation**: Keras/reticulate calls are now wrapped in `requireNamespace()` / `tryCatch()` guards so the dashboard still renders (falling back to a zero baseline) when the Python/Keras backend isn't available — a step toward reliable shinyapps.io deployment.
+- **shinydashboard UI Rework**: Rebuilt the app on `shinydashboard` (collapsible sidebar for Kepler ID selection, dashboard header with a GitHub link) with `shinyBS` tooltips on every toolbar control.
 
 ## Areas to focus
 
@@ -59,7 +64,7 @@ There were several constraints during the execution of the project: in terms of 
 - Create a platform independent package in R that can run automatically.
     - Add R vignettes.
 - Bandit algorithm to provide visibility on quality of users and tags to refine the crowdsourcing.
-- Figure out reticulate issue in deployment of application on shinyapps.io.
+- Figure out reticulate issue in deployment of application on shinyapps.io. (`app.Rmd` now guards all Keras/reticulate calls and pins an explicit `resource_files` manifest of the bundled `.tbl` / `.hdf5` files for shinyapps.io, but full Python backend support there is still unresolved.)
 
 ### Maybe later
 
