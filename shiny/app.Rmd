@@ -427,6 +427,65 @@ rank_stars_by_bandit <- function(db_conn, star_options) {
   out[order(-out$priority_sample), ]
 }
 
+# ---------------------------------------------------------------------
+# Community Tags view helper
+# ---------------------------------------------------------------------
+# Clusters every human tagger's saved windows for a star into merged
+# "regions" of agreement, reusing the same interval-merge machinery as the
+# bandit selector above. Input: a named list where each name is a user_id
+# and each value is that user's list of c(start, end) windows (e.g. the
+# output of get_star_human_tag_sets()). A user who explicitly tagged "no
+# transit" contributes an empty window list, so they add no region here,
+# but the caller should still count them in the tagger-count denominator
+# when reporting "N of M taggers agree" for a region - silence on a region
+# is itself information, not a missing vote.
+# Returns a data frame with one row per merged region: start, end,
+# n_taggers (how many distinct users have a window overlapping it), and
+# taggers (a comma-separated list of their names), sorted by start.
+build_community_regions <- function(tagger_windows) {
+  empty_out <- data.frame(start = integer(0), end = integer(0),
+                           n_taggers = integer(0), taggers = character(0),
+                           stringsAsFactors = FALSE)
+  rows_list <- lapply(names(tagger_windows), function(tg) {
+    ws <- tagger_windows[[tg]]
+    if (length(ws) == 0) return(NULL)
+    do.call(rbind, lapply(ws, function(w) data.frame(tagger = tg, start = w[1], end = w[2], stringsAsFactors = FALSE)))
+  })
+  rows <- do.call(rbind, rows_list)
+  if (is.null(rows) || nrow(rows) == 0) return(empty_out)
+  
+  rows <- rows[order(rows$start), ]
+  region_id <- integer(nrow(rows))
+  region_id[1] <- 1
+  cur_region <- 1
+  cur_end <- rows$end[1]
+  if (nrow(rows) > 1) {
+    for (i in 2:nrow(rows)) {
+      if (rows$start[i] <= cur_end + 1) {
+        region_id[i] <- cur_region
+        cur_end <- max(cur_end, rows$end[i])
+      } else {
+        cur_region <- cur_region + 1
+        region_id[i] <- cur_region
+        cur_end <- rows$end[i]
+      }
+    }
+  }
+  rows$region_id <- region_id
+  
+  agg <- do.call(rbind, lapply(split(rows, rows$region_id), function(g) {
+    data.frame(
+      start = min(g$start), end = max(g$end),
+      n_taggers = length(unique(g$tagger)),
+      taggers = paste(sort(unique(g$tagger)), collapse = ", "),
+      stringsAsFactors = FALSE
+    )
+  }))
+  agg <- agg[order(agg$start), ]
+  rownames(agg) <- NULL
+  agg
+}
+
 processed <- return_stars(processed)
 all_stars <- return_stars(all_stars)
 remaining <- setdiff(all_stars, processed)
@@ -677,6 +736,11 @@ server = function(input, output, session) {
   # set live inside output$trainPlot so output$model_fallback_banner can
   # warn that the plot is showing a flat zero baseline, not a real result.
   model_fallback_state <- reactiveVal(NULL)
+  
+  # Whether the "Community Tags" panel is currently expanded. Toggled by
+  # the toolbar button; independent of tag_mode so it can be checked
+  # either while browsing or while actively tagging.
+  community_tags_visible <- reactiveVal(FALSE)
   
   output$tag_window_summary <- renderText({
     w <- tag_windows()
@@ -1045,6 +1109,11 @@ server = function(input, output, session) {
         column(width = 12,
           uiOutput("bls_panel")
         )
+      ),
+      fluidRow(
+        column(width = 12,
+          uiOutput("community_tags_panel")
+        )
       )
     ))
   })
@@ -1066,6 +1135,64 @@ server = function(input, output, session) {
         icon("triangle-exclamation"),
         strong("Fallback baseline in use:"), msg
     )
+  })
+  
+  # Toggled by the "View/Hide Community Tags" toolbar button. Aggregates
+  # every human tagger's saved windows for the current star into merged
+  # regions, each annotated with how many (and which) taggers agree on it
+  # and whether the model's own test_idx detection also covers it - so a
+  # single user is no longer limited to seeing just their own tags (or the
+  # model default) in isolation.
+  output$community_tags_panel <- renderUI({
+    req(credentials()$user_auth, input$kplr_id)
+    if (!isTRUE(community_tags_visible())) return(NULL)
+    tag_save_trigger()
+    
+    id <- current_star_id()
+    human_sets <- get_star_human_tag_sets(db_conn, id)
+    model_set <- get_star_model_tag_set(db_conn, id)
+    n_human <- length(human_sets)
+    regions <- build_community_regions(human_sets)
+    
+    body <- if (nrow(regions) == 0) {
+      tags$p(style = "color:#777; font-style:italic; margin: 6px 0 0 0;",
+             if (n_human == 0) "No one has tagged this star yet \u2014 be the first!"
+             else "Every tagger for this star marked \u201cno transit\u201d \u2014 no candidate windows to show.")
+    } else {
+      merged_model <- merge_windows(model_set)
+      regions$model_match <- vapply(seq_len(nrow(regions)), function(i) {
+        windows_intersection_length(list(c(regions$start[i], regions$end[i])), merged_model) > 0
+      }, logical(1))
+      regions <- regions[order(-regions$n_taggers, regions$start), ]
+      
+      tags$table(class = "table table-striped table-condensed", style = "width:100%; font-size:0.85em; margin-top:8px;",
+        tags$thead(tags$tr(
+          tags$th("Window (cadence)"), tags$th("Agreement"), tags$th("Tagged by"), tags$th("Matches model?")
+        )),
+        tags$tbody(
+          lapply(seq_len(nrow(regions)), function(i) {
+            r <- regions[i, ]
+            tags$tr(
+              tags$td(sprintf("%d \u2013 %d", r$start, r$end)),
+              tags$td(sprintf("%d / %d", r$n_taggers, n_human)),
+              tags$td(r$taggers),
+              tags$td(if (r$model_match) icon("check", style = "color:#16a34a;") else icon("minus", style = "color:#999;"))
+            )
+          })
+        )
+      )
+    }
+    
+    div(style = "border: 1px solid #ddd; border-radius: 6px; padding: 12px; margin-bottom: 15px; background-color: #fafafa;",
+        tags$b("Community Tags"),
+        tags$p(style = "margin: 6px 0 0 0; font-size: 0.85em; color: #777;",
+               sprintf("%d user%s tagged this star so far.", n_human, if (n_human == 1) "" else "s")),
+        body
+    )
+  })
+  
+  observeEvent(input$toggle_community_tags, {
+    community_tags_visible(!isTRUE(community_tags_visible()))
   })
   
   output$toolbar <- renderUI({
@@ -1095,6 +1222,11 @@ server = function(input, output, session) {
 
         bsButton("verify_period", label = " Verify Period (BLS)", icon = icon("wave-square"), style = "default"),
         bsTooltip(id = "verify_period", title = "Run a Box Least Squares search on the full light curve, using the fixed windows as a duration hint, to estimate period/duration/depth", placement = "top", trigger = "hover"),
+
+        span(style = "margin-left: 10px; border-left: 2px solid #ddd; height: 32px; margin-right: 10px;"),
+
+        bsButton("toggle_community_tags", label = if (isTRUE(community_tags_visible())) " Hide Community Tags" else " View Community Tags", icon = icon("users"), style = "default"),
+        bsTooltip(id = "toggle_community_tags", title = "See how other users have tagged this star, aggregated by per-region agreement", placement = "top", trigger = "hover"),
 
         div(style = "width: 100%; margin-top: 6px; font-size: 0.9em; color: #555;",
             textOutput("tag_window_summary")
@@ -1131,7 +1263,12 @@ server = function(input, output, session) {
         span(style = "margin-left: 15px; border-left: 2px solid #ddd; height: 32px; margin-right: 10px;"),
 
         bsButton("verify_period", label = " Verify Period (BLS)", icon = icon("wave-square"), style = "default"),
-        bsTooltip(id = "verify_period", title = "Run a Box Least Squares search on the full light curve, using the current tagged windows as a duration hint, to estimate period/duration/depth", placement = "top", trigger = "hover")
+        bsTooltip(id = "verify_period", title = "Run a Box Least Squares search on the full light curve, using the current tagged windows as a duration hint, to estimate period/duration/depth", placement = "top", trigger = "hover"),
+
+        span(style = "margin-left: 15px; border-left: 2px solid #ddd; height: 32px; margin-right: 10px;"),
+
+        bsButton("toggle_community_tags", label = if (isTRUE(community_tags_visible())) " Hide Community Tags" else " View Community Tags", icon = icon("users"), style = "default"),
+        bsTooltip(id = "toggle_community_tags", title = "See how other users have tagged this star, aggregated by per-region agreement", placement = "top", trigger = "hover")
       )
     }
   })
