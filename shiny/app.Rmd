@@ -117,11 +117,144 @@ build_light_curve_plotly <- function(test_vec, pred_vec, xlim, ylim, idx_mask,
   return(p)
 }
 
+# ---------------------------------------------------------------------
+# BLS (Box Least Squares) period verification
+# ---------------------------------------------------------------------
+# A self-contained, heuristic BLS-style search used only by the dashboard
+# to sanity-check the period/duration/depth implied by a star's currently
+# tagged (or model-detected) transit windows against the full light curve.
+# This is NOT the training pipeline's detection step - it is read-only and
+# purely for on-screen verification.
+#
+#   flux         - numeric vector of (cleaned) flux values, one per cadence
+#   windows      - list of c(start, end) cadence-index pairs for the
+#                  currently tagged/detected windows; used only to seed a
+#                  sensible transit-duration search range
+#   cadence_days - days per cadence (Kepler long cadence ~29.4 min)
+#   n_periods    - number of trial periods to scan
+#   n_bins       - number of phase bins used for folding
+#
+# Returns NULL if there isn't enough usable data, otherwise a list with
+# period_days, duration_days, depth, depth_pct, snr, folded_phase,
+# folded_flux and transit_phase_range (for the verification plot).
+run_bls_search <- function(flux, windows, cadence_days = 29.4 / 1440,
+                            n_periods = 200, n_bins = 80) {
+  n <- length(flux)
+  ok <- is.finite(flux)
+  if (sum(ok) < 20) return(NULL)
+
+  idx <- which(ok)
+  fl <- flux[ok]
+  baseline <- stats::median(fl)
+  resid <- baseline - fl  # positive during a transit dip, whatever the flux baseline is
+
+  # Duration hint (in cadences) from currently tagged/detected windows
+  win_lens <- if (length(windows) > 0) sapply(windows, function(w) diff(w) + 1) else numeric(0)
+  dur_guess <- if (length(win_lens) > 0) stats::median(win_lens) else max(3, round(0.02 * n))
+  dur_candidates <- unique(pmax(2, round(dur_guess * c(0.5, 0.75, 1, 1.5, 2))))
+
+  min_period <- max(dur_candidates) * 3
+  max_period <- floor(n / 2)
+  if (!is.finite(min_period) || max_period <= min_period) return(NULL)
+  period_grid <- unique(round(seq(min_period, max_period, length.out = n_periods)))
+
+  # Sum of v over a circular window of length k starting at every position
+  circular_rolling_sum <- function(v, k) {
+    m <- length(v)
+    ext <- c(v, v[seq_len(k)])
+    csum <- c(0, cumsum(ext))
+    csum[(k + 1):(m + k)] - csum[1:m]
+  }
+
+  best <- list(sr = -Inf)
+  for (P in period_grid) {
+    phase <- ((idx - 1) %% P) / P
+    bin <- pmin(n_bins, floor(phase * n_bins) + 1)
+
+    y <- numeric(n_bins); cnt <- numeric(n_bins)
+    agg_sum <- tapply(resid, bin, sum)
+    agg_cnt <- tapply(resid, bin, length)
+    y[as.integer(names(agg_sum))] <- agg_sum
+    cnt[as.integer(names(agg_cnt))] <- agg_cnt
+    if (sum(cnt) == 0) next
+    w <- cnt / sum(cnt)
+
+    d_bins_set <- unique(pmax(1, pmin(n_bins - 1, round(n_bins * dur_candidates / P))))
+    for (d_bins in d_bins_set) {
+      roll_y <- circular_rolling_sum(y, d_bins)
+      roll_w <- circular_rolling_sum(w, d_bins)
+      sr <- (roll_y ^ 2) / (roll_w * (1 - roll_w) + 1e-9)
+      j <- which.max(sr)
+      if (isTRUE(sr[j] > best$sr) && roll_w[j] > 0) {
+        best <- list(sr = sr[j], period = P, d_bins = d_bins, phase_bin = j,
+                     w_in = roll_w[j], y_in = roll_y[j])
+      }
+    }
+  }
+
+  if (!is.finite(best$sr) || best$sr <= 0 || is.null(best$period)) return(NULL)
+
+  period_days <- best$period * cadence_days
+  duration_days <- (best$d_bins / n_bins) * period_days
+  depth <- best$y_in / (best$w_in * length(idx))  # mean in-transit residual, flux units
+  depth_pct <- if (abs(baseline) > 1e-9) 100 * depth / abs(baseline) else NA
+
+  raw_phase <- ((idx - 1) %% best$period) / best$period
+  transit_center <- ((best$phase_bin - 1) + best$d_bins / 2) / n_bins
+  shifted_phase <- (raw_phase - transit_center + 0.5) %% 1  # re-center transit at phase 0.5
+  half_dur_frac <- (best$d_bins / n_bins) / 2
+
+  list(
+    period_days = period_days,
+    duration_days = duration_days,
+    depth = depth,
+    depth_pct = depth_pct,
+    snr = sqrt(max(best$sr, 0)),
+    folded_phase = shifted_phase,
+    folded_flux = fl,
+    transit_phase_range = c(0.5 - half_dur_frac, 0.5 + half_dur_frac)
+  )
+}
+
+# Phase-folded verification plot for a run_bls_search() result: flux vs.
+# orbital phase (duplicated at phase+1 for visual continuity), with the
+# detected in-transit phase range shaded.
+build_phase_fold_plotly <- function(res) {
+  x <- c(res$folded_phase, res$folded_phase + 1)
+  y <- c(res$folded_flux, res$folded_flux)
+  rng <- res$transit_phase_range
+
+  p <- plot_ly() %>%
+    add_markers(x = x, y = y,
+                marker = list(color = "black", size = 4, opacity = 0.5),
+                name = "Folded Flux", hoverinfo = "x+y") %>%
+    layout(
+      title = sprintf("Phase-Folded Light Curve (P = %.3f days)", res$period_days),
+      xaxis = list(title = "Orbital Phase", range = c(0, 1.3)),
+      yaxis = list(title = "Flux"),
+      shapes = list(
+        list(type = "rect", xref = "x", yref = "paper",
+             x0 = rng[1], x1 = rng[2], y0 = 0, y1 = 1,
+             fillcolor = "rgba(220,38,38,0.15)",
+             line = list(color = "rgba(220,38,38,0.6)", width = 1)),
+        list(type = "rect", xref = "x", yref = "paper",
+             x0 = rng[1] + 1, x1 = rng[2] + 1, y0 = 0, y1 = 1,
+             fillcolor = "rgba(220,38,38,0.15)",
+             line = list(color = "rgba(220,38,38,0.6)", width = 1))
+      ),
+      showlegend = FALSE
+    ) %>%
+    config(displaylogo = FALSE)
+
+  return(p)
+}
+
 processed <- return_stars(processed)
 all_stars <- return_stars(all_stars)
 remaining <- setdiff(all_stars, processed)
 train_ratio <- 0.7
 seq_len <- 128
+cadence_days <- 29.4 / 1440  # Kepler long-cadence spacing, in days (29.4 min)
 
 
 mydb <- dbConnect(RSQLite::SQLite(), sql_db_file)
@@ -303,6 +436,11 @@ server = function(input, output, session) {
   # already updates instantly client-side in plotly - doesn't force a full
   # plot rebuild while the user is mid-drag.
   bump_tag_redraw <- function() tag_redraw_trigger(isolate(tag_redraw_trigger()) + 1)
+
+  # Result of the most recent BLS (Box Least Squares) period search for the
+  # currently selected star; NULL until "Verify Period (BLS)" is run, and
+  # cleared whenever a different star is selected.
+  bls_result <- reactiveVal(NULL)
   
   output$tag_window_summary <- renderText({
     w <- tag_windows()
@@ -319,6 +457,7 @@ server = function(input, output, session) {
     zoom_state$xlim <- NULL
     tag_mode(FALSE)
     tag_windows(list())
+    bls_result(NULL)
     refresh_saved_indices()
   })
   
@@ -479,6 +618,38 @@ server = function(input, output, session) {
     zoom_state$xlim <- NULL
   })
   
+  # Run a BLS (Box Least Squares) period search on the full light curve for
+  # the selected star, using whichever windows are currently "live" - the
+  # in-progress tag_windows() while tagging, otherwise the star's saved (or
+  # model-detected) windows - as a duration hint. Read-only: does not touch
+  # user_star / test_idx, it only estimates period/duration/depth for
+  # on-screen verification.
+  observeEvent(input$verify_period, {
+    req(input$kplr_id)
+    file <- list.files(data_dir, pattern = input$kplr_id, full.names = TRUE)[1]
+    if (is.na(file) || !file.exists(file)) return(invisible(NULL))
+    
+    windows <- if (isTRUE(tag_mode())) isolate(tag_windows()) else indices_to_windows(isolate(saved_indices()))
+    
+    result <- withProgress(message = "Running BLS period search...", value = 0.2, {
+      raw_df <- read_kepler_table(file)
+      cleaned_df <- clean_light_curve(raw_df)
+      split_res <- split_train_test(cleaned_df, train_ratio = train_ratio, seq_len = seq_len)
+      test_vec <- as.vector(split_res$y_test)
+      incProgress(0.3, detail = "Scanning trial periods")
+      out <- run_bls_search(flux = test_vec, windows = windows, cadence_days = cadence_days)
+      incProgress(0.5, detail = "Done")
+      out
+    })
+    
+    if (is.null(result)) {
+      showNotification("Not enough data (or no clear dip) to run a period search on this star.", type = "warning")
+      bls_result(NULL)
+    } else {
+      bls_result(result)
+    }
+  })
+  
   user_info <- reactive({
     return(credentials()$info)
   })
@@ -611,6 +782,11 @@ server = function(input, output, session) {
         column(width = 12,
           uiOutput("toolbar")
         )
+      ),
+      fluidRow(
+        column(width = 12,
+          uiOutput("bls_panel")
+        )
       )
     ))
   })
@@ -637,6 +813,11 @@ server = function(input, output, session) {
 
         bsButton("cancel_tagging", label = " Cancel", icon = icon("times"), style = "danger"),
         bsTooltip(id = "cancel_tagging", title = "Discard this tagging session without saving", placement = "top", trigger = "hover"),
+
+        span(style = "margin-left: 10px; border-left: 2px solid #ddd; height: 32px; margin-right: 10px;"),
+
+        bsButton("verify_period", label = " Verify Period (BLS)", icon = icon("wave-square"), style = "default"),
+        bsTooltip(id = "verify_period", title = "Run a Box Least Squares search on the full light curve, using the fixed windows as a duration hint, to estimate period/duration/depth", placement = "top", trigger = "hover"),
 
         div(style = "width: 100%; margin-top: 6px; font-size: 0.9em; color: #555;",
             textOutput("tag_window_summary")
@@ -668,9 +849,41 @@ server = function(input, output, session) {
         bsTooltip(id = "customize", title = "Start a manual tagging session with a blank slate", placement = "top", trigger = "hover"),
 
         bsButton("reset", label = "Reset Tags to Model", icon = icon("undo"), style = "danger"),
-        bsTooltip(id = "reset", title = "Remove saved tags and revert to model-detected candidates", placement = "top", trigger = "hover")
+        bsTooltip(id = "reset", title = "Remove saved tags and revert to model-detected candidates", placement = "top", trigger = "hover"),
+
+        span(style = "margin-left: 15px; border-left: 2px solid #ddd; height: 32px; margin-right: 10px;"),
+
+        bsButton("verify_period", label = " Verify Period (BLS)", icon = icon("wave-square"), style = "default"),
+        bsTooltip(id = "verify_period", title = "Run a Box Least Squares search on the full light curve, using the current tagged windows as a duration hint, to estimate period/duration/depth", placement = "top", trigger = "hover")
       )
     }
+  })
+  
+  # Summary panel + phase-folded verification plot for the most recent BLS
+  # period search on the selected star. Hidden (NULL) until a search has
+  # been run for the current star (see observeEvent(input$verify_period)).
+  output$bls_panel <- renderUI({
+    res <- bls_result()
+    if (is.null(res)) return(NULL)
+    div(style = "border: 1px solid #ddd; border-radius: 6px; padding: 12px; margin-bottom: 15px; background-color: #fafafa;",
+      tags$b("BLS Period Verification"),
+      tags$p(style = "margin: 6px 0 10px 0; font-size: 0.85em; color: #777;",
+             "Heuristic Box Least Squares search over the full light curve \u2014 a quick sanity check, not a publication-grade period search."),
+      fluidRow(
+        column(width = 3, tags$b("Period:"), br(), sprintf("%.3f days", res$period_days)),
+        column(width = 3, tags$b("Duration:"), br(), sprintf("%.3f days", res$duration_days)),
+        column(width = 3, tags$b("Depth:"), br(),
+               if (is.na(res$depth_pct)) sprintf("%.4f", res$depth) else sprintf("%.4f (%.2f%% of baseline)", res$depth, res$depth_pct)),
+        column(width = 3, tags$b("Signal strength:"), br(), sprintf("%.2f", res$snr))
+      ),
+      plotlyOutput("phaseFoldPlot", height = "320px")
+    )
+  })
+  
+  output$phaseFoldPlot <- renderPlotly({
+    res <- bls_result()
+    req(res)
+    build_phase_fold_plotly(res)
   })
   
   output$login_page <- renderUI({
