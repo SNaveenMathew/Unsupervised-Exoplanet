@@ -672,6 +672,12 @@ server = function(input, output, session) {
   # recomputes live on click regardless of this trigger.
   tag_save_trigger <- reactiveVal(0)
   
+  # NULL whenever the most recent trainPlot render used a real model
+  # prediction; otherwise one of "no_model" / "no_keras" / "load_error",
+  # set live inside output$trainPlot so output$model_fallback_banner can
+  # warn that the plot is showing a flat zero baseline, not a real result.
+  model_fallback_state <- reactiveVal(NULL)
+  
   output$tag_window_summary <- renderText({
     w <- tag_windows()
     if (length(w) == 0) {
@@ -936,13 +942,28 @@ server = function(input, output, session) {
     )
     valid_mdl <- mdl_candidates[file.exists(mdl_candidates)][1]
     
+    # y_pred stays at the zero baseline - and fallback_reason records exactly
+    # why - whenever a real prediction couldn't be produced, so the UI can
+    # flag it below instead of silently plotting a flat "no anomaly" line as
+    # if it were a genuine model result.
     y_pred <- array(0, dim = dim(y_test))
-    if(!is.na(valid_mdl) && file.exists(valid_mdl) && requireNamespace("keras", quietly = TRUE)) {
-      tryCatch({
+    fallback_reason <- NULL
+    if (is.na(valid_mdl)) {
+      fallback_reason <- "no_model"
+    } else if (!requireNamespace("keras", quietly = TRUE)) {
+      fallback_reason <- "no_keras"
+    } else {
+      pred_or_err <- tryCatch({
         model <- keras::load_model_hdf5(valid_mdl)
-        y_pred <- predict(model, x_test, verbose = 0)
-      }, error = function(e) NULL)
+        predict(model, x_test, verbose = 0)
+      }, error = function(e) e)
+      if (inherits(pred_or_err, "error")) {
+        fallback_reason <- "load_error"
+      } else {
+        y_pred <- pred_or_err
+      }
     }
+    model_fallback_state(fallback_reason)
     
     # Ensure static plot file is saved for disk cache if not already existing,
     # and seed test_idx with model-detected candidates on first view
@@ -1006,6 +1027,11 @@ server = function(input, output, session) {
     return(fluidPage(
       fluidRow(
         column(width = 12,
+          uiOutput("model_fallback_banner")
+        )
+      ),
+      fluidRow(
+        column(width = 12,
           plotlyOutput("trainPlot", height = "520px")
         )
       ),
@@ -1023,6 +1049,25 @@ server = function(input, output, session) {
     ))
   })
 
+  # Visible warning banner for whenever the plot above is showing the
+  # zero-baseline fallback instead of a real model prediction (no model
+  # file on disk, Keras/reticulate unavailable, or the model failed to
+  # load/run) - so it is never mistaken for a genuine result.
+  output$model_fallback_banner <- renderUI({
+    req(credentials()$user_auth)
+    reason <- model_fallback_state()
+    if (is.null(reason)) return(NULL)
+    msg <- switch(reason,
+      "no_model"   = "No trained model found for this star (star-specific or global fallback) \u2014 showing a flat zero baseline, not a real prediction.",
+      "no_keras"   = "The Keras/reticulate backend is not available on this server \u2014 showing a flat zero baseline, not a real prediction.",
+      "load_error" = "A trained model file exists for this star but failed to load or run \u2014 showing a flat zero baseline, not a real prediction.",
+      "Showing a flat zero baseline, not a real model prediction.")
+    div(style = "background:#fff3cd; border:1px solid #ffe69c; color:#664d03; border-radius:6px; padding:8px 14px; margin-bottom:12px; font-size:0.9em; display:flex; align-items:center; gap:8px;",
+        icon("triangle-exclamation"),
+        strong("Fallback baseline in use:"), msg
+    )
+  })
+  
   output$toolbar <- renderUI({
     if (isTRUE(tag_mode())) {
       div(style = "display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 15px;",
