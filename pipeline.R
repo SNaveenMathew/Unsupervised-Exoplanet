@@ -7,6 +7,42 @@ library(keras)
 library(reshape2)
 source("util.R")
 
+#' Enable mixed-precision (fp16 compute / fp32 master weights) training when
+#' a GPU is available.
+#'
+#' On a GPU with tensor cores (compute capability 7.0+ - any RTX/V100/
+#' A-series/H-series card), this roughly doubles the achievable batch size
+#' or model capacity for a fixed memory budget, at essentially no accuracy
+#' cost for a model this size - directly relevant when training on a single
+#' 16GB GPU. Skipped automatically on CPU-only setups, where fp16 ops
+#' aren't hardware-accelerated and mixed precision provides no benefit (and
+#' can even be slightly slower), and skipped gracefully if the installed
+#' TF/Keras build doesn't support it. See build_conv1d_autoencoder()'s final
+#' layer for the matching float32-output requirement this needs to stay
+#' numerically stable.
+#'
+#' @return TRUE if mixed precision was enabled, FALSE otherwise (invisible)
+enable_mixed_precision_if_available <- function() {
+  has_gpu <- tryCatch({
+    length(tensorflow::tf$config$list_physical_devices("GPU")) > 0
+  }, error = function(e) FALSE)
+  
+  if (!has_gpu) {
+    message("No GPU detected - training in default (fp32) precision.")
+    return(invisible(FALSE))
+  }
+  
+  ok <- tryCatch({
+    tensorflow::tf$keras$mixed_precision$set_global_policy("mixed_float16")
+    message("GPU detected - enabled mixed_float16 precision for training.")
+    TRUE
+  }, error = function(e) {
+    message("Mixed precision not available (", conditionMessage(e), ") - continuing in default precision.")
+    FALSE
+  })
+  invisible(ok)
+}
+
 #' Build a 1D Convolutional Autoencoder for light curve reconstruction
 #'
 #' @param seq_len Sequence window length (default: 128)
@@ -32,7 +68,13 @@ build_conv1d_autoencoder <- function(seq_len = 128, lr = 0.001) {
     layer_upsampling_1d(size = 2) %>%
     layer_conv_1d(filters = 32, kernel_size = 5, padding = "same", activation = "relu") %>%
     layer_upsampling_1d(size = 2) %>%
-    layer_conv_1d(filters = 1, kernel_size = 5, padding = "same", activation = "linear")
+    # Forced to float32 even under a mixed_float16 global policy (see
+    # enable_mixed_precision_if_available() above) - standard mixed-
+    # precision practice: keeping the last layer's activation/loss
+    # computation in float32 avoids numerical instability (e.g. NaN loss)
+    # that a linear output layer combined with MSE loss can hit in fp16,
+    # while every earlier layer still gets the fp16 speed/memory benefit.
+    layer_conv_1d(filters = 1, kernel_size = 5, padding = "same", activation = "linear", dtype = "float32")
   
   model %>% compile(
     loss = "mse",
@@ -57,6 +99,8 @@ run_pipeline <- function(data_dir = "data", seq_len = 128, train_ratio = 0.7,
                          batch_size = 256, epochs = 20, run_hrs = 8,
                          db_file = "shiny/exoplanet_db.sqlite") {
   
+  enable_mixed_precision_if_available()
+  
   # Ensure output directories exist
   dir.create("plots/learning_curve", showWarnings = FALSE, recursive = TRUE)
   dir.create("plots/test_pred_plot", showWarnings = FALSE, recursive = TRUE)
@@ -66,11 +110,11 @@ run_pipeline <- function(data_dir = "data", seq_len = 128, train_ratio = 0.7,
   
   # Initialize SQLite database and Kepler star metadata natively
   mydb <- dbConnect(RSQLite::SQLite(), db_file)
+  on.exit(dbDisconnect(mydb), add = TRUE)
   
   files <- list.files(path = data_dir, pattern = "\\.tbl$", full.names = TRUE)
   if(length(files) == 0) {
     message("No .tbl files found in ", data_dir)
-    dbDisconnect(mydb)
     return(data.frame())
   }
   
@@ -95,8 +139,9 @@ run_pipeline <- function(data_dir = "data", seq_len = 128, train_ratio = 0.7,
   
   tm_start <- Sys.time()
   metrics_df <- data.frame()
-  train_idx_df <- data.frame()
-  test_idx_df <- data.frame()
+  n_stars_processed <- 0L
+  n_train_cands <- 0L
+  n_test_cands <- 0L
   
   message(sprintf("Starting pipeline on %d light curves with seq_len=%d, batch_size=%d...",
                   length(files), seq_len, batch_size))
@@ -136,9 +181,10 @@ run_pipeline <- function(data_dir = "data", seq_len = 128, train_ratio = 0.7,
       }
       
       mdl_file <- file.path("trained_models", paste0(out_name, ".hdf5"))
+      just_trained <- !file.exists(mdl_file)
       
       # 3. Model Training / Loading
-      if(!file.exists(mdl_file)) {
+      if(just_trained) {
         model <- build_conv1d_autoencoder(seq_len = seq_len)
         
         his <- model %>% fit(
@@ -170,41 +216,42 @@ run_pipeline <- function(data_dir = "data", seq_len = 128, train_ratio = 0.7,
         model <- load_model_hdf5(mdl_file)
       }
       
-      # 4. Asymmetric Transit Candidate Detection on Train & Test sets
-      # Predict reconstructions
+      # 4. Asymmetric Transit Candidate Detection on Train & Test sets,
+      # recorded via record_candidates() (util.R) - the exact same function
+      # score_star() (used by the Shiny app and precompute_all_stars.R)
+      # calls for its own DB writes, so a star's candidates can never
+      # silently differ depending on which part of the codebase computed
+      # them. Writes happen immediately per star (rather than accumulated
+      # in memory and written once at the very end, as before) so an
+      # interrupted run - the run_hrs timeout above, or a crash - never
+      # loses candidates for stars that were already successfully
+      # processed. force = just_trained: a freshly retrained model
+      # overwrites any stale candidates left over from a previous run; a
+      # model merely reloaded from disk (nothing about it changed) respects
+      # the existing cache and skips the redundant write - this also makes
+      # re-running the whole pipeline over an already-processed data_dir
+      # safe (no duplicate rows), which the original accumulate-then-
+      # dbWriteTable/insert_into_db approach did not guarantee.
       x_train_pred <- predict(model, x_train, verbose = 0)
       x_test_pred  <- predict(model, x_test, verbose = 0)
       
-      # Evaluate candidate dips and save visual verification plots
       train_plot_file <- file.path("plots/train_pred_plot", paste0(out_name, "_train_plot.png"))
-      temp_train_cands <- save_plot(
-        y_pred = x_train_pred,
-        y = y_train,
-        out_file = train_plot_file
+      rec_train <- record_candidates(
+        y_pred = x_train_pred, y = y_train, star_id = star_id,
+        db_conn = mydb, table_name = "train_idx",
+        plot_file = train_plot_file, force = just_trained
       )
-      
-      if(nrow(temp_train_cands) > 0) {
-        temp_train_cands$id <- star_id
-        temp_train_cands <- temp_train_cands[, c("id", "start", "end")]
-      } else {
-        temp_train_cands <- data.frame(id = star_id, start = 0, end = 0)
-      }
-      train_idx_df <- rbind(train_idx_df, temp_train_cands)
       
       test_plot_file <- file.path("plots/test_pred_plot", paste0(out_name, "_test_plot.png"))
-      temp_test_cands <- save_plot(
-        y_pred = x_test_pred,
-        y = y_test,
-        out_file = test_plot_file
+      rec_test <- record_candidates(
+        y_pred = x_test_pred, y = y_test, star_id = star_id,
+        db_conn = mydb, table_name = "test_idx",
+        plot_file = test_plot_file, force = just_trained
       )
       
-      if(nrow(temp_test_cands) > 0) {
-        temp_test_cands$id <- star_id
-        temp_test_cands <- temp_test_cands[, c("id", "start", "end")]
-      } else {
-        temp_test_cands <- data.frame(id = star_id, start = 0, end = 0)
-      }
-      test_idx_df <- rbind(test_idx_df, temp_test_cands)
+      n_stars_processed <- n_stars_processed + 1L
+      n_train_cands <- n_train_cands + nrow(rec_train$candidates)
+      n_test_cands  <- n_test_cands + nrow(rec_test$candidates)
       
     }, error = function(e) {
       err_msg <- sprintf("[%s] Error processing %s: %s\n", Sys.time(), files[i], as.character(e))
@@ -213,20 +260,10 @@ run_pipeline <- function(data_dir = "data", seq_len = 128, train_ratio = 0.7,
     })
   }
   
-  # 5. Update SQLite Database
-  if(!("train_idx" %in% dbListTables(mydb))) {
-    dbWriteTable(mydb, "train_idx", train_idx_df, overwrite = TRUE)
-    dbWriteTable(mydb, "test_idx", test_idx_df, overwrite = TRUE)
-  } else {
-    insert_into_db(db_file, "train_idx", train_idx_df)
-    insert_into_db(db_file, "test_idx", test_idx_df)
-  }
-  dbDisconnect(mydb)
-  
-  message(sprintf("Pipeline complete. Processed %d stars. Detected %d train candidates, %d test candidates.",
-                  length(unique(c(train_idx_df$id, test_idx_df$id))),
-                  nrow(train_idx_df[train_idx_df$start > 0, ]),
-                  nrow(test_idx_df[test_idx_df$start > 0, ])))
+  message(sprintf(
+    "Pipeline complete. Processed %d star(s). Detected %d train candidate window(s), %d test candidate window(s).",
+    n_stars_processed, n_train_cands, n_test_cands
+  ))
   
   return(metrics_df)
 }
