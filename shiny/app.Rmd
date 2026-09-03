@@ -219,6 +219,232 @@ run_bls_search <- function(flux, windows, cadence_days = 29.4 / 1440,
   )
 }
 
+# ---------------------------------------------------------------------
+# GPU-accelerated period search (optional) with automatic CPU fallback
+# ---------------------------------------------------------------------
+# run_bls_search() above is a pure-R implementation, good enough for an
+# on-demand sanity check, but not fast: a full period/duration grid search
+# over a whole light curve is exactly the kind of embarrassingly parallel
+# workload GPUs excel at. cuvarbase (PyCUDA) implements a GPU Box Least
+# Squares search and is used in published TESS planet-search work; on real
+# hardware its "fast" mode processes a ~70k-point Kepler light curve in
+# roughly a second versus ~30s on CPU. This wrapper calls it through
+# reticulate when available and returns NULL otherwise, so
+# run_bls_search_auto() below can fall back to the CPU implementation the
+# same way the Keras model-loading fallback works elsewhere in this file -
+# both BLS implementations return the same list() shape, so nothing
+# downstream (build_phase_fold_plotly, bls_panel) needs to know which ran.
+#
+# IMPORTANT, read before relying on this: this path requires a real CUDA
+# GPU, reticulate, and a Python environment with cuvarbase installed. Only
+# the unavailable-dependency fallback (reticulate/cuvarbase missing ->
+# cleanly returns NULL, run_bls_search_auto() falls through to the CPU
+# path) has been exercised here - there is no CUDA hardware in this
+# development environment to run the GPU code path itself against.
+run_bls_search_gpu <- function(flux, windows, cadence_days = 29.4 / 1440, n_periods = 200) {
+  if (!requireNamespace("reticulate", quietly = TRUE)) return(NULL)
+  if (!isTRUE(tryCatch(reticulate::py_module_available("cuvarbase"), error = function(e) FALSE))) return(NULL)
+  
+  ok <- is.finite(flux)
+  if (sum(ok) < 20) return(NULL)
+  idx <- which(ok)
+  fl <- flux[ok]
+  n <- length(flux)
+  
+  t <- (idx - 1) * cadence_days
+  y <- fl
+  noise <- stats::mad(fl, na.rm = TRUE)
+  dy <- rep(if (is.finite(noise) && noise > 0) noise else 1e-3, length(fl))
+  
+  win_lens <- if (length(windows) > 0) sapply(windows, function(w) diff(w) + 1) else numeric(0)
+  dur_guess <- if (length(win_lens) > 0) stats::median(win_lens) else max(3, round(0.02 * n))
+  dur_candidates <- unique(pmax(2, round(dur_guess * c(0.5, 0.75, 1, 1.5, 2))))
+  
+  min_period_days <- max(dur_candidates) * 3 * cadence_days
+  max_period_days <- floor(n / 2) * cadence_days
+  if (!is.finite(min_period_days) || max_period_days <= min_period_days) return(NULL)
+  
+  fmin <- 1 / max_period_days
+  fmax <- 1 / min_period_days
+  freqs <- seq(fmin, fmax, length.out = n_periods)
+  
+  qmin <- max(0.001, min(dur_candidates) * cadence_days / max_period_days)
+  qmax <- min(0.5, max(dur_candidates) * cadence_days / min_period_days)
+  if (qmax <= qmin) qmax <- qmin * 1.5
+  
+  result <- tryCatch({
+    cvb_bls <- reticulate::import("cuvarbase.bls")
+    np <- reticulate::import("numpy")
+    sol <- cvb_bls$eebls_gpu_fast(
+      np$asarray(t), np$asarray(y), np$asarray(dy), np$asarray(freqs),
+      qmin = qmin, qmax = qmax, dlogq = 0.1, noverlap = 3
+    )
+    list(bls_power = sol[[1]], sols = sol[[2]])
+  }, error = function(e) e)
+  
+  if (inherits(result, "error") || is.null(result)) return(NULL)
+  
+  bls_power <- as.numeric(result$bls_power)
+  best_i <- which.max(bls_power)
+  if (length(best_i) == 0 || !is.finite(bls_power[best_i])) return(NULL)
+  
+  best_freq <- freqs[best_i]
+  period_days <- 1 / best_freq
+  q_best <- tryCatch(as.numeric(result$sols[[best_i]][[1]]), error = function(e) NA_real_)
+  phi0_best <- tryCatch(as.numeric(result$sols[[best_i]][[2]]), error = function(e) NA_real_)
+  if (!is.finite(q_best) || !is.finite(phi0_best) || q_best <= 0) return(NULL)
+  
+  duration_days <- q_best * period_days
+  
+  baseline <- stats::median(y)
+  phase <- ((t / period_days) - phi0_best) %% 1
+  in_transit <- phase < q_best
+  if (sum(in_transit) < 2) return(NULL)
+  depth <- baseline - mean(y[in_transit])
+  depth_pct <- if (abs(baseline) > 1e-9) 100 * depth / abs(baseline) else NA
+  out_sd <- stats::sd(y[!in_transit])
+  snr <- if (is.finite(out_sd) && out_sd > 0) abs(depth) / (out_sd / sqrt(sum(in_transit))) else NA
+  
+  shifted_phase <- (phase - q_best / 2 + 0.5) %% 1
+  half_dur_frac <- q_best / 2
+  
+  list(
+    period_days = period_days,
+    duration_days = duration_days,
+    depth = depth,
+    depth_pct = depth_pct,
+    snr = snr,
+    folded_phase = shifted_phase,
+    folded_flux = y,
+    transit_phase_range = c(0.5 - half_dur_frac, 0.5 + half_dur_frac)
+  )
+}
+
+# Tries the GPU path first, falling back to the pure-R CPU implementation on
+# any missing dependency or runtime error. Tags the result with $engine so
+# the UI can show which one actually ran.
+run_bls_search_auto <- function(flux, windows, cadence_days = 29.4 / 1440) {
+  gpu_res <- tryCatch(run_bls_search_gpu(flux, windows, cadence_days), error = function(e) NULL)
+  if (!is.null(gpu_res)) {
+    gpu_res$engine <- "gpu"
+    return(gpu_res)
+  }
+  cpu_res <- run_bls_search(flux, windows, cadence_days)
+  if (!is.null(cpu_res)) cpu_res$engine <- "cpu"
+  cpu_res
+}
+
+# ---------------------------------------------------------------------
+# Statistical vetting checks (odd-even transit test, secondary eclipse)
+# ---------------------------------------------------------------------
+# Two classic, purely statistical checks used as vetting features in
+# published exoplanet-candidate classifiers (e.g. ExoMiner's odd-even and
+# secondary-eclipse diagnostic branches, NotPlaNET's contaminant CNN): a
+# genuine planet should transit with equal depth at every epoch and show no
+# significant secondary eclipse opposite the primary. A significant
+# difference in either is the classic signature of a background/blended
+# eclipsing binary rather than a real planet. These need no trained model
+# and no labeled data - they run directly on the BLS result already
+# computed for the "Verify Period" button.
+
+# Splits in-transit points by whether they fall in an odd- or even-numbered
+# epoch (relative to the detected period) and compares mean depth between
+# the two groups. Returns NULL if there isn't enough data spanning multiple
+# transits of each parity to make the comparison meaningful.
+run_odd_even_test <- function(flux, period_cadences, transit_phase_range, min_epochs_each = 2) {
+  fl <- as.vector(flux)
+  ok <- is.finite(fl)
+  if (sum(ok) < 20 || !is.finite(period_cadences) || period_cadences <= 1) return(NULL)
+  
+  idx <- which(ok) - 1  # 0-based cadence offset
+  vals <- fl[ok]
+  epoch <- floor(idx / period_cadences)
+  phase <- (idx %% period_cadences) / period_cadences
+  in_transit <- phase >= transit_phase_range[1] & phase <= transit_phase_range[2]
+  if (sum(in_transit) < 6) return(NULL)
+  
+  odd_mask  <- in_transit & (epoch %% 2 == 1)
+  even_mask <- in_transit & (epoch %% 2 == 0)
+  n_odd_epochs  <- length(unique(epoch[odd_mask]))
+  n_even_epochs <- length(unique(epoch[even_mask]))
+  if (n_odd_epochs < min_epochs_each || n_even_epochs < min_epochs_each) return(NULL)
+  
+  baseline <- stats::median(vals)
+  odd_depth  <- baseline - mean(vals[odd_mask])
+  even_depth <- baseline - mean(vals[even_mask])
+  odd_sd  <- stats::sd(vals[odd_mask])
+  even_sd <- stats::sd(vals[even_mask])
+  n_odd  <- sum(odd_mask)
+  n_even <- sum(even_mask)
+  
+  se_diff <- sqrt((odd_sd^2 / n_odd) + (even_sd^2 / n_even))
+  diff <- odd_depth - even_depth
+  z <- if (is.finite(se_diff) && se_diff > 0) diff / se_diff else NA_real_
+  
+  list(
+    odd_depth = odd_depth, even_depth = even_depth,
+    n_odd_transits = n_odd_epochs, n_even_transits = n_even_epochs,
+    diff_sigma = z,
+    flag_likely_eb = is.finite(z) && abs(z) > 3
+  )
+}
+
+# Scans phase ~0.5 (opposite the primary transit) for a second, statistically
+# significant dip - a background/blended eclipsing binary's secondary
+# eclipse. Returns NULL if there isn't enough in- and out-of-transit data to
+# compare.
+run_secondary_eclipse_check <- function(flux, period_cadences, transit_phase_range, sigma_thresh = 3) {
+  fl <- as.vector(flux)
+  ok <- is.finite(fl)
+  if (sum(ok) < 20 || !is.finite(period_cadences) || period_cadences <= 1) return(NULL)
+  
+  idx <- which(ok) - 1
+  vals <- fl[ok]
+  phase <- (idx %% period_cadences) / period_cadences
+  
+  half_dur <- (transit_phase_range[2] - transit_phase_range[1]) / 2
+  primary_center <- mean(transit_phase_range)
+  secondary_center <- (primary_center + 0.5) %% 1
+  sec_lo <- secondary_center - half_dur
+  sec_hi <- secondary_center + half_dur
+  
+  in_secondary <- if (sec_lo < 0) {
+    (phase >= (sec_lo + 1)) | (phase <= sec_hi)
+  } else if (sec_hi > 1) {
+    (phase >= sec_lo) | (phase <= (sec_hi - 1))
+  } else {
+    (phase >= sec_lo) & (phase <= sec_hi)
+  }
+  in_primary <- phase >= transit_phase_range[1] & phase <= transit_phase_range[2]
+  out_of_transit <- !in_secondary & !in_primary
+  
+  if (sum(in_secondary) < 4 || sum(out_of_transit) < 10) return(NULL)
+  
+  baseline <- mean(vals[out_of_transit])
+  base_sd  <- stats::sd(vals[out_of_transit])
+  sec_depth <- baseline - mean(vals[in_secondary])
+  se <- base_sd / sqrt(sum(in_secondary))
+  z <- if (is.finite(se) && se > 0) sec_depth / se else NA_real_
+  
+  list(
+    secondary_depth = sec_depth,
+    depth_sigma = z,
+    flag_likely_eb = is.finite(z) && z > sigma_thresh
+  )
+}
+
+# Runs both vetting checks against a run_bls_search()/run_bls_search_auto()
+# result. Converts period_days back to cadences (the checks work in cadence
+# units) since neither BLS implementation retains per-point epoch numbers.
+run_vetting_checks <- function(flux, bls_res, cadence_days = 29.4 / 1440) {
+  if (is.null(bls_res)) return(NULL)
+  period_cadences <- bls_res$period_days / cadence_days
+  list(
+    odd_even = run_odd_even_test(flux, period_cadences, bls_res$transit_phase_range),
+    secondary_eclipse = run_secondary_eclipse_check(flux, period_cadences, bls_res$transit_phase_range)
+  )
+}
+
 # Phase-folded verification plot for a run_bls_search() result: flux vs.
 # orbital phase (duplicated at phase+1 for visual continuity), with the
 # detected in-transit phase range shaded.
@@ -726,6 +952,11 @@ server = function(input, output, session) {
   # cleared whenever a different star is selected.
   bls_result <- reactiveVal(NULL)
   
+  # Odd-even transit and secondary-eclipse vetting check results for the
+  # most recent BLS search (see run_vetting_checks()). NULL until a search
+  # has been run, or if there wasn't enough data to compute them.
+  vetting_result <- reactiveVal(NULL)
+  
   # Bumped whenever a tagging change is saved (confirm/reset) so the
   # star-priority badge recomputes; the bandit "Suggest" button always
   # recomputes live on click regardless of this trigger.
@@ -943,8 +1174,16 @@ server = function(input, output, session) {
       split_res <- split_train_test(cleaned_df, train_ratio = train_ratio, seq_len = seq_len)
       test_vec <- as.vector(split_res$y_test)
       incProgress(0.3, detail = "Scanning trial periods")
-      out <- run_bls_search(flux = test_vec, windows = windows, cadence_days = cadence_days)
-      incProgress(0.5, detail = "Done")
+      # Tries GPU-accelerated cuvarbase via reticulate first, transparently
+      # falling back to the pure-R implementation - see run_bls_search_auto().
+      out <- run_bls_search_auto(flux = test_vec, windows = windows, cadence_days = cadence_days)
+      incProgress(0.3, detail = "Running odd-even / secondary-eclipse vetting checks")
+      if (!is.null(out)) {
+        vetting_result(run_vetting_checks(test_vec, out, cadence_days = cadence_days))
+      } else {
+        vetting_result(NULL)
+      }
+      incProgress(0.2, detail = "Done")
       out
     })
     
@@ -1269,8 +1508,31 @@ server = function(input, output, session) {
   output$bls_panel <- renderUI({
     res <- bls_result()
     if (is.null(res)) return(NULL)
+    vet <- vetting_result()
+    
+    engine_label <- if (identical(res$engine, "gpu")) "GPU (cuvarbase)" else "CPU (R)"
+    
+    vetting_rows <- list()
+    if (!is.null(vet) && !is.null(vet$odd_even)) {
+      oe <- vet$odd_even
+      vetting_rows[[length(vetting_rows) + 1]] <- tags$li(
+        sprintf("Odd-even depth difference: %.2fσ (%d odd, %d even transit%s)",
+                if (is.finite(oe$diff_sigma)) oe$diff_sigma else NA, oe$n_odd_transits, oe$n_even_transits,
+                if (oe$n_even_transits == 1) "" else "s"),
+        if (isTRUE(oe$flag_likely_eb)) tags$span(style = "color:#dc2626; font-weight:bold; margin-left:6px;", "⚠ possible eclipsing binary") else NULL
+      )
+    }
+    if (!is.null(vet) && !is.null(vet$secondary_eclipse)) {
+      se <- vet$secondary_eclipse
+      vetting_rows[[length(vetting_rows) + 1]] <- tags$li(
+        sprintf("Secondary eclipse: %.2fσ above noise at phase ~0.5", if (is.finite(se$depth_sigma)) se$depth_sigma else NA),
+        if (isTRUE(se$flag_likely_eb)) tags$span(style = "color:#dc2626; font-weight:bold; margin-left:6px;", "⚠ possible eclipsing binary") else NULL
+      )
+    }
+    
     div(style = "border: 1px solid #ddd; border-radius: 6px; padding: 12px; margin-bottom: 15px; background-color: #fafafa;",
       tags$b("BLS Period Verification"),
+      tags$span(style = "float:right; font-size:0.8em; color:#777; border:1px solid #ddd; border-radius:10px; padding:2px 8px;", engine_label),
       tags$p(style = "margin: 6px 0 10px 0; font-size: 0.85em; color: #777;",
              "Heuristic Box Least Squares search over the full light curve \u2014 a quick sanity check, not a publication-grade period search."),
       fluidRow(
@@ -1280,7 +1542,12 @@ server = function(input, output, session) {
                if (is.na(res$depth_pct)) sprintf("%.4f", res$depth) else sprintf("%.4f (%.2f%% of baseline)", res$depth, res$depth_pct)),
         column(width = 3, tags$b("Signal strength:"), br(), sprintf("%.2f", res$snr))
       ),
-      plotlyOutput("phaseFoldPlot", height = "320px")
+      plotlyOutput("phaseFoldPlot", height = "320px"),
+      if (length(vetting_rows) > 0) tagList(
+        tags$hr(style = "margin: 10px 0;"),
+        tags$b("Vetting checks", style = "font-size:0.9em;"),
+        tags$ul(style = "font-size:0.85em; color:#555; margin-top:4px;", vetting_rows)
+      ) else NULL
     )
   })
   
