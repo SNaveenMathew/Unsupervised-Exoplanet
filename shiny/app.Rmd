@@ -737,6 +737,11 @@ server = function(input, output, session) {
   # warn that the plot is showing a flat zero baseline, not a real result.
   model_fallback_state <- reactiveVal(NULL)
   
+  # Result of the fast, model-free triage_scan() (see util.R) for whichever
+  # star output$trainPlot most recently rendered. NULL until a star has been
+  # scored at least once.
+  triage_state <- reactiveVal(NULL)
+  
   # Whether the "Community Tags" panel is currently expanded. Toggled by
   # the toolbar button; independent of tag_mode so it can be checked
   # either while browsing or while actively tagging.
@@ -990,61 +995,29 @@ server = function(input, output, session) {
     dir.create(plots_dir, showWarnings = FALSE, recursive = TRUE)
     plot_file <- file.path(plots_dir, paste0(out_base, "_test_plot.png"))
     
-    raw_df <- read_kepler_table(file)
-    cleaned_df <- clean_light_curve(raw_df)
-    split_res <- split_train_test(cleaned_df, train_ratio = train_ratio, seq_len = seq_len)
-    y_test <- split_res$y_test
-    x_test <- split_res$x_test
-    test_vec <- as.vector(y_test)
-    
-    # Model inference (or load cached model)
     mdl_candidates <- c(
       file.path("trained_models", paste0(out_base, ".hdf5")),
       file.path("../trained_models", paste0(out_base, ".hdf5")),
       file.path("trained_models", "global_conv1d_autoencoder.hdf5"),
       file.path("../trained_models", "global_conv1d_autoencoder.hdf5")
     )
-    valid_mdl <- mdl_candidates[file.exists(mdl_candidates)][1]
     
-    # y_pred stays at the zero baseline - and fallback_reason records exactly
-    # why - whenever a real prediction couldn't be produced, so the UI can
-    # flag it below instead of silently plotting a flat "no anomaly" line as
-    # if it were a genuine model result.
-    y_pred <- array(0, dim = dim(y_test))
-    fallback_reason <- NULL
-    if (is.na(valid_mdl)) {
-      fallback_reason <- "no_model"
-    } else if (!requireNamespace("keras", quietly = TRUE)) {
-      fallback_reason <- "no_keras"
-    } else {
-      pred_or_err <- tryCatch({
-        model <- keras::load_model_hdf5(valid_mdl)
-        predict(model, x_test, verbose = 0)
-      }, error = function(e) e)
-      if (inherits(pred_or_err, "error")) {
-        fallback_reason <- "load_error"
-      } else {
-        y_pred <- pred_or_err
-      }
-    }
-    model_fallback_state(fallback_reason)
-    
-    # Ensure static plot file is saved for disk cache if not already existing,
-    # and seed test_idx with model-detected candidates on first view
-    if(!file.exists(plot_file)) {
-      detected_cands <- save_plot(y_pred = y_pred, y = y_test, out_file = plot_file)
-      star_id <- as.integer(gsub("^kplr([0-9]+).*", "\\1", out_base))
-      if(nrow(detected_cands) > 0 && is.finite(star_id)) {
-        detected_cands$id <- star_id
-        detected_cands <- detected_cands[, c("id", "start", "end")]
-        existing <- tryCatch({
-          dbGetQuery(db_conn, paste0("SELECT count(*) FROM test_idx WHERE id=", star_id, ";"))[1, 1]
-        }, error = function(e) 0)
-        if(is.na(existing) || existing == 0) {
-          dbWriteTable(db_conn, "test_idx", detected_cands, append = TRUE)
-        }
-      }
-    }
+    # score_star() (in util.R) is the single shared implementation of
+    # "read, clean, triage-scan, predict-or-fall-back, detect, cache" - used
+    # identically here and by the standalone precompute_all_stars.R batch
+    # script, so the two can never silently disagree on a star's result.
+    # It has no Shiny dependency, so the fallback/triage state it returns is
+    # pushed into the reactiveVals here rather than inside score_star itself.
+    score <- score_star(
+      tbl_file = file, trained_model_paths = mdl_candidates,
+      db_conn = db_conn, plot_file = plot_file,
+      seq_len = seq_len, train_ratio = train_ratio, cadence_days = cadence_days
+    )
+    y_test <- score$y_test
+    y_pred <- score$y_pred
+    test_vec <- score$test_vec
+    model_fallback_state(score$fallback_reason)
+    triage_state(score$triage)
     
     # Anomaly mask for VIEW mode: reflects the user's saved tags (falling
     # back to model-detected candidates when the user has none of their own)
@@ -1126,6 +1099,23 @@ server = function(input, output, session) {
     req(credentials()$user_auth)
     reason <- model_fallback_state()
     if (is.null(reason)) return(NULL)
+    
+    if (identical(reason, "triage_skip")) {
+      # Not a degraded result - the fast pre-model triage scan found no
+      # statistically plausible dip at all, so the (comparatively expensive)
+      # model load/inference was skipped on purpose. Shown as neutral/
+      # informational rather than a warning, distinct from the three
+      # reasons below where the model genuinely couldn't be run.
+      tr <- triage_state()
+      n_pts <- if (!is.null(tr) && is.finite(tr$n_candidate_points)) tr$n_candidate_points else 0
+      return(div(style = "background:#e7f1ff; border:1px solid #b6d4fe; color:#084298; border-radius:6px; padding:8px 14px; margin-bottom:12px; font-size:0.9em; display:flex; align-items:center; gap:8px;",
+        icon("bolt"),
+        strong("Fast triage:"),
+        sprintf("no plausible dip found (%d candidate point%s below threshold) \u2014 full model skipped to save compute.",
+                n_pts, if (identical(n_pts, 1L)) "" else "s")
+      ))
+    }
+    
     msg <- switch(reason,
       "no_model"   = "No trained model found for this star (star-specific or global fallback) \u2014 showing a flat zero baseline, not a real prediction.",
       "no_keras"   = "The Keras/reticulate backend is not available on this server \u2014 showing a flat zero baseline, not a real prediction.",
