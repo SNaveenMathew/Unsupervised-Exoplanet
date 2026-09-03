@@ -712,6 +712,72 @@ build_community_regions <- function(tagger_windows) {
   agg
 }
 
+# ---------------------------------------------------------------------
+# Crowd-consensus training-data export (closing the loop)
+# ---------------------------------------------------------------------
+# Right now, human tagging only produces a static audit trail: it changes
+# what a given user sees, but never feeds back into the model itself. This
+# exports two labeled datasets from exactly the tagging data already
+# aggregated above, meant to be picked up by an offline retraining/
+# fine-tuning script (pipeline.R / main.R - not part of this Shiny app):
+#   - "consensus": regions where every human tagger for a star agrees (and
+#     at least `min_agreement` of them), i.e. a trustworthy positive label.
+#   - "disputed": regions where SOME but not all human taggers for a star
+#     flagged something - genuine disagreement, not just an untagged area.
+#     These are exactly the hard examples the bandit selector already
+#     prioritizes surfacing to human taggers, and make equally good hard
+#     examples for fine-tuning (see the "close the loop" discussion this
+#     implements).
+# Returns list(consensus = data.frame(...), disputed = data.frame(...)),
+# both with columns: kepler_id, start, end, n_taggers, n_human, taggers,
+# agreement_frac, label.
+export_training_labels <- function(db_conn, star_options, min_agreement = 2) {
+  ids <- vapply(star_options, function(s) as.integer(gsub("^kplr", "", strsplit(s, "_")[[1]][1])), integer(1))
+  
+  consensus_rows <- list()
+  disputed_rows <- list()
+  
+  for (id in ids) {
+    human_sets <- get_star_human_tag_sets(db_conn, id)
+    n_human <- length(human_sets)
+    if (n_human == 0) next
+    
+    regions <- build_community_regions(human_sets)
+    if (nrow(regions) == 0) next
+    
+    for (i in seq_len(nrow(regions))) {
+      r <- regions[i, ]
+      row <- data.frame(
+        kepler_id = id, start = r$start, end = r$end,
+        n_taggers = r$n_taggers, n_human = n_human, taggers = r$taggers,
+        agreement_frac = r$n_taggers / n_human,
+        stringsAsFactors = FALSE
+      )
+      if (r$n_taggers >= min_agreement && r$n_taggers == n_human) {
+        row$label <- "consensus_transit"
+        consensus_rows[[length(consensus_rows) + 1]] <- row
+      } else if (r$n_taggers >= 1 && r$n_taggers < n_human) {
+        row$label <- "disputed"
+        disputed_rows[[length(disputed_rows) + 1]] <- row
+      }
+    }
+  }
+  
+  empty_cols <- c("kepler_id", "start", "end", "n_taggers", "n_human", "taggers", "agreement_frac", "label")
+  make_empty <- function() {
+    df <- data.frame(matrix(ncol = length(empty_cols), nrow = 0))
+    colnames(df) <- empty_cols
+    df
+  }
+  
+  consensus_df <- if (length(consensus_rows) > 0) do.call(rbind, consensus_rows) else make_empty()
+  disputed_df  <- if (length(disputed_rows)  > 0) do.call(rbind, disputed_rows)  else make_empty()
+  rownames(consensus_df) <- NULL
+  rownames(disputed_df) <- NULL
+  
+  list(consensus = consensus_df, disputed = disputed_df)
+}
+
 processed <- return_stars(processed)
 all_stars <- return_stars(all_stars)
 remaining <- setdiff(all_stars, processed)
