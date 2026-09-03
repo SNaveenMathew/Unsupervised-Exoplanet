@@ -305,6 +305,237 @@ save_plot <- function(y_pred, y, out_file, thr = NULL, lwr = NULL, upr = NULL) {
   return(df)
 }
 
+#' Fast, model-free triage scan for whether a light curve segment shows any
+#' statistically plausible transit-like dip, so the (comparatively expensive)
+#' autoencoder inference can be skipped entirely when there's clearly nothing
+#' to find. Deliberately tuned toward HIGH RECALL (few false "nothing here"
+#' verdicts) at the cost of some false positives passing through to the full
+#' model: the cost of a false pass-through is one extra (cheap-by-comparison)
+#' inference call, while the cost of a false skip is a missed transit, which
+#' is much worse. This is a threshold rule, not a learned classifier - it
+#' will not match the skip rate of a trained triage model (e.g. AstroNet-
+#' Triage), but the worth_full_scan interface here is architecture-agnostic,
+#' so a learned classifier can be swapped in later without touching callers.
+#'
+#' @param flux Cleaned, detrended flux vector (e.g. the flattened y_test from
+#'   split_train_test())
+#' @param sigma_thresh MAD-based sigma threshold for a candidate dip point
+#'   (default 3.0 - deliberately looser than detect_transit_candidates()'s
+#'   default 2.5-on-reconstruction-error, since raw flux is noisier than a
+#'   model's residual and we'd rather over-pass than under-pass)
+#' @param min_duration,max_duration Candidate run length bounds, in cadences.
+#'   max_duration is intentionally wider than detect_transit_candidates()'s
+#'   default, since the true transit width isn't known yet at this stage.
+#' @param min_points Minimum number of finite points required to run the
+#'   scan at all; below this, default to worth_full_scan = TRUE (too little
+#'   data to safely skip on).
+#' @return list(worth_full_scan, n_candidate_points, candidate_windows)
+triage_scan <- function(flux, sigma_thresh = 3.0, min_duration = 2, max_duration = 48, min_points = 20) {
+  fl <- as.vector(flux)
+  ok <- is.finite(fl)
+  if (sum(ok) < min_points) {
+    return(list(worth_full_scan = TRUE, n_candidate_points = NA_integer_, candidate_windows = list()))
+  }
+  
+  baseline <- stats::median(fl[ok])
+  # Noise scale must come from the full, symmetric residual - NOT from the
+  # one-sided pmax(0, ...) dip values below, which are mostly zero and would
+  # badly underestimate the true noise scale (most of a symmetric noise
+  # distribution gets clipped away, collapsing its MAD toward 0 and making
+  # the resulting threshold far too loose).
+  robust_sd <- stats::mad(fl[ok] - baseline, na.rm = TRUE)
+  dip <- rep(0, length(fl))
+  dip[ok] <- pmax(0, baseline - fl[ok])  # positive during a negative flux dip
+  
+  if (!is.finite(robust_sd) || robust_sd <= 0) {
+    return(list(worth_full_scan = TRUE, n_candidate_points = NA_integer_, candidate_windows = list()))
+  }
+  
+  is_cand <- ok & (dip > sigma_thresh * robust_sd)
+  
+  starts <- integer(0); ends <- integer(0)
+  if (any(is_cand)) {
+    rle_res <- rle(is_cand)
+    end_idx <- cumsum(rle_res$lengths)
+    start_idx <- c(1, end_idx[-length(end_idx)] + 1)
+    true_runs <- which(rle_res$values == TRUE)
+    for (r in true_runs) {
+      dur <- rle_res$lengths[r]
+      if (dur >= min_duration && dur <= max_duration) {
+        starts <- c(starts, start_idx[r])
+        ends <- c(ends, end_idx[r])
+      }
+    }
+  }
+  
+  windows <- if (length(starts) > 0) lapply(seq_along(starts), function(i) c(starts[i], ends[i])) else list()
+  
+  list(
+    worth_full_scan = length(windows) > 0,
+    n_candidate_points = sum(is_cand),
+    candidate_windows = windows
+  )
+}
+
+#' Score a single star end to end: read + clean + window the light curve,
+#' run the fast triage scan, then (only if triage says it's worth it) load a
+#' trained model and predict, then detect transit candidates and cache the
+#' result. This is the single source of truth for "what does this star's
+#' result look like" - shared by the Shiny app's on-demand view
+#' (output$trainPlot) and the standalone precompute_all_stars.R batch script,
+#' so the two can never silently compute a star's result differently.
+#'
+#' Deliberately has NO dependency on Shiny (no reactives, no reactiveVal
+#' writes) so it can run in a plain Rscript context. The caller is
+#' responsible for surfacing fallback_reason/triage in whatever UI it has.
+#'
+#' @param tbl_file Path to the star's .tbl file
+#' @param trained_model_paths Character vector of candidate .hdf5 paths to
+#'   try in order (e.g. star-specific first, then a global fallback model).
+#'   The first one that exists on disk is used.
+#' @param db_conn Open DBI connection to the exoplanet_db.sqlite database
+#'   (for the test_idx cache table). Pass NULL to skip DB caching entirely
+#'   (e.g. a dry run).
+#' @param plot_file Optional PNG path; if given and it doesn't already exist,
+#'   a comparison plot is written there via save_plot() (matching the Shiny
+#'   app's on-disk plot cache). Pass NULL to skip plot generation, which the
+#'   batch script does by default so it doesn't litter plots/ with thousands
+#'   of PNGs.
+#' @param seq_len,train_ratio,cadence_days As used elsewhere in the pipeline
+#' @param triage_sigma Sigma threshold passed through to triage_scan()
+#' @param force If TRUE, recompute and overwrite any existing test_idx rows
+#'   for this star even if it's already cached
+#' @return list(kepler_id, out_base, y_test, x_test, test_vec, y_pred,
+#'   candidates, fallback_reason, triage, from_cache)
+score_star <- function(tbl_file, trained_model_paths, db_conn = NULL, plot_file = NULL,
+                        seq_len = 128, train_ratio = 0.7, cadence_days = 29.4 / 1440,
+                        triage_sigma = 3.0, force = FALSE) {
+  out_base <- tools::file_path_sans_ext(basename(tbl_file))
+  star_id <- suppressWarnings(as.integer(gsub("^kplr([0-9]+).*", "\\1", out_base)))
+  
+  raw_df <- read_kepler_table(tbl_file)
+  cleaned_df <- clean_light_curve(raw_df)
+  split_res <- split_train_test(cleaned_df, train_ratio = train_ratio, seq_len = seq_len)
+  y_test <- split_res$y_test
+  x_test <- split_res$x_test
+  test_vec <- as.vector(y_test)
+  
+  # --- Stage 1: fast, model-free triage scan ---
+  triage <- triage_scan(test_vec, sigma_thresh = triage_sigma)
+  
+  y_pred <- array(0, dim = dim(y_test))
+  fallback_reason <- NULL
+  
+  if (!isTRUE(triage$worth_full_scan)) {
+    # Triage found nothing worth a closer look - skip model load/inference
+    # entirely. This is an intentional, expected zero result (compute
+    # saved), not a degraded one, and should be surfaced to the user as such
+    # rather than lumped in with the "couldn't get a real prediction"
+    # reasons below.
+    fallback_reason <- "triage_skip"
+  } else {
+    valid_mdl <- trained_model_paths[file.exists(trained_model_paths)][1]
+    if (is.na(valid_mdl)) {
+      fallback_reason <- "no_model"
+    } else if (!requireNamespace("keras", quietly = TRUE)) {
+      fallback_reason <- "no_keras"
+    } else {
+      pred_or_err <- tryCatch({
+        model <- keras::load_model_hdf5(valid_mdl)
+        predict(model, x_test, verbose = 0)
+      }, error = function(e) e)
+      if (inherits(pred_or_err, "error")) {
+        fallback_reason <- "load_error"
+      } else {
+        y_pred <- pred_or_err
+      }
+    }
+  }
+  
+  # detect_transit_candidates() + save_plot() + DB caching are all handled
+  # by record_candidates() below - the same function pipeline.R's training
+  # loop calls for both its train_idx and test_idx writes, so a star's
+  # recorded candidates can never silently differ depending on which part
+  # of the codebase computed them.
+  rec <- record_candidates(
+    y_pred = y_pred, y = y_test, star_id = star_id,
+    db_conn = db_conn, table_name = "test_idx",
+    plot_file = plot_file, force = force
+  )
+  
+  list(
+    kepler_id = star_id, out_base = out_base,
+    y_test = y_test, x_test = x_test, test_vec = test_vec,
+    y_pred = y_pred, candidates = rec$candidates,
+    fallback_reason = fallback_reason, triage = triage,
+    from_cache = rec$from_cache
+  )
+}
+
+#' Detects transit candidates for a (prediction, actual) pair and records
+#' them into the given SQLite table. This is the single shared
+#' implementation of "what do we write to the database for a star's
+#' candidates" - used by score_star() above (for the Shiny app and
+#' precompute_all_stars.R) AND by pipeline.R's training loop (for both
+#' train_idx and test_idx), so the two can never silently disagree.
+#'
+#' A star with genuinely zero detected candidates still gets ONE row
+#' written (start = 0, end = 0 - the same "nothing found" placeholder
+#' convention app.Rmd already uses for an explicit "no transit" human tag)
+#' rather than no row at all. Otherwise a star that was scored and truly
+#' has no candidates would look identical, from a cache-presence check, to
+#' a star that was never scored at all - and would get silently recomputed
+#' forever by any caller that checks cache presence via row count (as
+#' precompute_all_stars.R does).
+#'
+#' @param y_pred,y Predicted/reconstructed and actual arrays (same shape)
+#' @param star_id Integer Kepler ID
+#' @param db_conn Open DBI connection. Pass NULL to skip the DB write
+#'   entirely (candidates are still computed and returned).
+#' @param table_name Target table, e.g. "test_idx" or "train_idx"
+#' @param plot_file Optional PNG path; written via save_plot() if given and
+#'   not already on disk.
+#' @param force If TRUE, delete any existing rows for this star in
+#'   table_name first (recompute/overwrite). If FALSE (default) and rows
+#'   already exist, nothing is written and from_cache = TRUE.
+#' @return list(candidates, from_cache)
+record_candidates <- function(y_pred, y, star_id, db_conn = NULL, table_name = "test_idx",
+                               plot_file = NULL, force = FALSE) {
+  det_res <- detect_transit_candidates(y_pred = y_pred, y = y)
+  candidates <- det_res$candidates
+  
+  if (!is.null(plot_file) && !file.exists(plot_file)) {
+    tryCatch(save_plot(y_pred = y_pred, y = y, out_file = plot_file), error = function(e) NULL)
+  }
+  
+  from_cache <- FALSE
+  if (!is.null(db_conn) && is.finite(star_id)) {
+    existing <- tryCatch({
+      dbGetQuery(db_conn, sprintf("SELECT count(*) AS n FROM %s WHERE id = ?;", table_name),
+                 params = list(star_id))$n
+    }, error = function(e) 0L)
+    existing <- if (length(existing) == 0) 0L else existing
+    
+    if (!force && existing > 0) {
+      from_cache <- TRUE
+    } else {
+      if (force && existing > 0) {
+        dbExecute(db_conn, sprintf("DELETE FROM %s WHERE id = ?;", table_name), params = list(star_id))
+      }
+      cand_out <- if (nrow(candidates) > 0) {
+        out <- candidates
+        out$id <- star_id
+        out[, c("id", "start", "end")]
+      } else {
+        data.frame(id = star_id, start = 0, end = 0)  # placeholder: "scored, nothing found"
+      }
+      dbWriteTable(db_conn, table_name, cand_out, append = TRUE)
+    }
+  }
+  
+  list(candidates = candidates, from_cache = from_cache)
+}
+
 #' Safe, batch SQLite insertion
 #'
 #' @param db_file SQLite database path
