@@ -1238,7 +1238,7 @@ server = function(input, output, session) {
       raw_df <- read_kepler_table(file)
       cleaned_df <- clean_light_curve(raw_df)
       split_res <- split_train_test(cleaned_df, train_ratio = train_ratio, seq_len = seq_len)
-      test_vec <- as.vector(split_res$y_test)
+      test_vec <- flatten_chronological(split_res$y_test)
       incProgress(0.3, detail = "Scanning trial periods")
       # Tries GPU-accelerated cuvarbase via reticulate first, transparently
       # falling back to the pure-R implementation - see run_bls_search_auto().
@@ -1354,7 +1354,10 @@ server = function(input, output, session) {
                        if(!is.null(xlim_dep)) sprintf("[Zoomed: %d - %d]", xlim[1], xlim[2]) else "",
                        if(in_tag_mode) " [Manual Tagging Mode]" else "")
     
-    pred_vec <- as.vector(y_pred)
+    # Must match test_vec's flattening exactly (both go through
+    # flatten_chronological via score_star()/score$test_vec) or the
+    # predicted-baseline line would be plotted against the wrong points.
+    pred_vec <- flatten_chronological(y_pred)
     cur_windows <- isolate(tag_windows())
     
     build_light_curve_plotly(test_vec = test_vec, pred_vec = pred_vec,

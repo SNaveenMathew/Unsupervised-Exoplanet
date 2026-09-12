@@ -121,6 +121,23 @@ clean_light_curve <- function(df, max_gap_days = 0.5, flare_sigma = 3.0, detrend
 
 #' Extract fixed-length sliding windows strictly within continuous chunks
 #'
+#' Normalization statistics (median, MAD) are computed ONCE per chunk, from
+#' the whole continuous segment, and applied identically to every window
+#' drawn from it - NOT per-window. Per-window mean/sd normalization (the
+#' original approach here) breaks the "transits are rare events" assumption
+#' anomaly detection depends on, two ways at once: (1) it forces every
+#' window to the same mean=0/std=1 scale regardless of content, so a
+#' perfectly quiet window's own tiny noise floor gets stretched until some
+#' of its points cross the same threshold as a window with a real dip -
+#' guaranteeing a roughly constant false-positive rate per window
+#' regardless of whether real signal is present; (2) a genuine transit deep
+#' or wide enough to influence its own window's mean/std dilutes its own
+#' apparent significance (the classic "masking effect" in robust
+#' statistics: outliers judged against statistics that include themselves
+#' get hidden). Chunk-level median/MAD fixes both: "how anomalous" is now
+#' measured against the star's actual noise floor, computed once, robust to
+#' the very dips being searched for.
+#'
 #' @param cleaned_df Dataframe from clean_light_curve
 #' @param seq_len Length of sequence window (default: 128 cadences ~ 2.6 days)
 #' @param stride Step size between windows (default: 16)
@@ -139,15 +156,20 @@ extract_windows <- function(cleaned_df, seq_len = 128, stride = 16) {
     n_pts <- nrow(chk)
     if(n_pts < seq_len) next
     
+    # Robust normalization statistics for the WHOLE chunk, computed once -
+    # see the function docstring for why this replaces per-window mean/sd.
+    chunk_center <- stats::median(chk$cleaned_flux, na.rm = TRUE)
+    chunk_scale <- stats::mad(chk$cleaned_flux, na.rm = TRUE)
+    if(!is.finite(chunk_scale) || chunk_scale == 0) chunk_scale <- 1.0
+    
     starts <- seq(1, n_pts - seq_len + 1, by = stride)
     for(st in starts) {
       en <- st + seq_len - 1
       sub_flux <- chk$cleaned_flux[st:en]
       
-      # Standardize window locally (zero mean, unit variance)
-      w_sd <- stats::sd(sub_flux)
-      if(is.na(w_sd) || w_sd == 0) w_sd <- 1.0
-      w_norm <- (sub_flux - mean(sub_flux)) / w_sd
+      # Same chunk-wide center/scale applied to every window - a window's
+      # own content never affects its own normalization.
+      w_norm <- (sub_flux - chunk_center) / chunk_scale
       
       windows[[length(windows) + 1]] <- w_norm
       meta_list[[length(meta_list) + 1]] <- data.frame(
@@ -229,26 +251,93 @@ split_train_test <- function(wave, train_ratio = 0.7, seq_len = 128) {
   return(list(x_train = x_train, y_train = y_train, x_test = x_test, y_test = y_test))
 }
 
+#' Flattens a (n_windows, seq_len, 1) tensor into a 1D vector in
+#' chronological order (all of window 1, then all of window 2, ...).
+#'
+#' R's default as.vector() on an array flattens column-major, meaning the
+#' FIRST dimension (window index) varies fastest - so a single window's own
+#' seq_len positions end up scattered n_windows apart in the flattened
+#' vector, never contiguous. That silently broke every downstream
+#' "contiguous run" computation built on top of it: detect_transit_
+#' candidates() below, triage_scan(), BLS phase-folding, plotting, and
+#' every start/end index ever stored in test_idx/user_star. A transit
+#' fully contained within a single window could never register as a
+#' multi-point contiguous run, because its own points were never adjacent
+#' in the flattened vector to begin with - confirmed directly: the exact
+#' same 8-cadence injected dip is found correctly when it's the only
+#' window, and missed entirely as soon as it's embedded among others.
+#'
+#' Falls back to plain as.vector() for anything that isn't a 3D array (e.g.
+#' an already-flattened vector), so existing callers passing flat data are
+#' unaffected.
+#'
+#' @param arr A (n_windows, seq_len, 1) array, or any other object
+#' @return A flattened numeric vector in chronological order
+flatten_chronological <- function(arr) {
+  d <- dim(arr)
+  if (is.null(d) || length(d) != 3) return(as.vector(arr))
+  as.vector(aperm(arr, c(2, 1, 3)))
+}
+
 #' Detect exoplanet transit candidates using one-sided negative flux reconstruction errors
+#'
+#' Thresholding uses robust (median/MAD) statistics on the residual, not
+#' ordinary mean/SD. Transits are assumed rare - that's the entire premise
+#' of framing this as anomaly detection - but ordinary mean/SD are NOT
+#' robust to the very outliers being searched for: a handful of genuine
+#' deep transits inflate the SD and raise the threshold, masking real
+#' signal (the same "masking effect" fixed in extract_windows()'s
+#' normalization). MAD tolerates up to ~50% contamination before breaking
+#' down, far more than any real transit duty cycle, so the threshold stays
+#' anchored to the star's actual noise floor rather than being dragged
+#' around by the anomalies themselves. R's mad() applies the standard
+#' 1.4826 consistency constant, so it's on the same numeric scale as SD for
+#' near-Gaussian noise - sigma_thresh keeps its usual meaning.
 #'
 #' @param y_pred Reconstructed/predicted flux array
 #' @param y Actual flux array
 #' @param sigma_thresh Standard deviation multiplier for anomaly detection (default: 2.5)
 #' @param min_duration Minimum transit duration in cadences (default: 2 ~ 1 hour)
 #' @param max_duration Maximum transit duration in cadences (default: 24 ~ 12 hours)
+#' @param merge_gap Collapses candidates whose starts are within this many
+#'   cadences of each other into a single representative candidate (the
+#'   first of the group). Overlapping windows (stride < seq_len) mean a
+#'   single physical dip near a window boundary gets independently
+#'   re-flagged in every subsequent overlapping window that still contains
+#'   it, each appearing exactly (seq_len - stride) cadences apart in the
+#'   chronologically-flattened vector (see flatten_chronological()) -
+#'   verified directly: a real dip on a real star showed up as 4 near-
+#'   identical candidates exactly 96 (= 128 - 32) cadences apart, three
+#'   separate times. Pass merge_gap = seq_len - stride (score_star() and
+#'   pipeline.R both do) to collapse these back into one candidate per
+#'   real event; leave at the default 0 for already-deduplicated or
+#'   non-windowed input.
 #' @return list with anomaly mask and candidate data frame (start, end)
-detect_transit_candidates <- function(y_pred, y, sigma_thresh = 2.5, min_duration = 2, max_duration = 24) {
+detect_transit_candidates <- function(y_pred, y, sigma_thresh = 2.5, min_duration = 2, max_duration = 24, merge_gap = 0) {
+  # Signed, symmetric residual: positive where actual is below predicted
+  # (a transit candidate), negative where actual is above it. Flattened
+  # chronologically (see flatten_chronological()) so a run of contiguous
+  # anomalous cadences within one window actually registers as contiguous,
+  # rather than being scattered n_windows apart by R's default as.vector().
+  diff_vec <- flatten_chronological(y_pred) - flatten_chronological(y)
+  
+  # Center and noise scale MUST come from the full symmetric residual
+  # above, not from the one-sided clipped res_error below. res_error is
+  # exactly zero for roughly half of all points by construction (wherever
+  # actual >= predicted), so computing median/MAD directly on it badly
+  # underestimates the true noise scale - the same zero-inflation failure
+  # mode already fixed in triage_scan() for exactly this reason.
+  err_center <- stats::median(diff_vec, na.rm = TRUE)
+  err_scale <- stats::mad(diff_vec, na.rm = TRUE)
+  
   # Asymmetric error: Exoplanet transits are negative dips (actual < predicted baseline)
-  # error = max(0, predicted - actual)
-  res_error <- pmax(0, as.vector(y_pred) - as.vector(y))
+  # error = max(0, predicted - actual), centered on the residual's own median
+  res_error <- pmax(0, diff_vec - err_center)
   
-  err_mean <- mean(res_error, na.rm = TRUE)
-  err_sd <- stats::sd(res_error, na.rm = TRUE)
-  
-  if(is.na(err_sd) || err_sd == 0) {
+  if(is.na(err_scale) || err_scale == 0) {
     thr <- Inf
   } else {
-    thr <- err_mean + sigma_thresh * err_sd
+    thr <- sigma_thresh * err_scale
   }
   
   is_anom <- (res_error > thr) & is.finite(res_error)
@@ -273,6 +362,17 @@ detect_transit_candidates <- function(y_pred, y, sigma_thresh = 2.5, min_duratio
   }
   
   cand_df <- data.frame(start = starts, end = ends)
+  
+  # Collapse redundant re-detections of the same physical event across
+  # overlapping windows - see the merge_gap parameter doc above.
+  if (merge_gap > 0 && nrow(cand_df) > 1) {
+    cand_df <- cand_df[order(cand_df$start), ]
+    gaps <- c(Inf, diff(cand_df$start))  # Inf forces the first row to start a new group
+    group_id <- cumsum(gaps > merge_gap)
+    cand_df <- cand_df[!duplicated(group_id), ]
+    rownames(cand_df) <- NULL
+  }
+  
   return(list(is_anomaly = is_anom, candidates = cand_df, threshold = thr))
 }
 
@@ -290,14 +390,22 @@ save_plot <- function(y_pred, y, out_file, thr = NULL, lwr = NULL, upr = NULL) {
   idx <- det_res$is_anomaly
   df <- det_res$candidates
   
+  # Must use the SAME chronological flattening detect_transit_candidates()
+  # used internally to build idx/df above - plotting y/y_pred with plain
+  # as.vector() here would put the light curve back in scrambled order
+  # while idx stays chronological, silently misaligning every highlighted
+  # "anomaly" dot with the wrong point.
+  y_flat <- flatten_chronological(y)
+  y_pred_flat <- flatten_chronological(y_pred)
+  
   dir.create(dirname(out_file), showWarnings = FALSE, recursive = TRUE)
   
   png(out_file, width = 1366, height = 768)
   col_vec <- ifelse(idx, "red", "black")
-  plot(as.vector(y), col = col_vec, pch = 20, cex = 0.5,
+  plot(y_flat, col = col_vec, pch = 20, cex = 0.5,
        ylab = "Normalized Flux", xlab = "Cadence Index",
        main = paste("Transit Anomaly Detection -", basename(out_file)))
-  lines(as.vector(y_pred), col = "dodgerblue", lwd = 1.5)
+  lines(y_pred_flat, col = "dodgerblue", lwd = 1.5)
   legend("bottomleft", legend = c("Light Curve", "Detected Transit Dip", "Autoencoder Baseline"),
          col = c("black", "red", "dodgerblue"), pch = c(20, 20, NA), lty = c(NA, NA, 1), lwd = c(NA, NA, 2))
   dev.off()
@@ -418,7 +526,11 @@ score_star <- function(tbl_file, trained_model_paths, db_conn = NULL, plot_file 
   split_res <- split_train_test(cleaned_df, train_ratio = train_ratio, seq_len = seq_len)
   y_test <- split_res$y_test
   x_test <- split_res$x_test
-  test_vec <- as.vector(y_test)
+  # Chronologically-ordered flattening (see flatten_chronological()) - NOT
+  # plain as.vector(), which would scatter each window's own points
+  # n_windows apart and silently break every "contiguous run" computation
+  # downstream (triage, detection, BLS, plotting) that consumes test_vec.
+  test_vec <- flatten_chronological(y_test)
   
   # --- Stage 1: fast, model-free triage scan ---
   triage <- triage_scan(test_vec, sigma_thresh = triage_sigma)
@@ -456,11 +568,15 @@ score_star <- function(tbl_file, trained_model_paths, db_conn = NULL, plot_file 
   # by record_candidates() below - the same function pipeline.R's training
   # loop calls for both its train_idx and test_idx writes, so a star's
   # recorded candidates can never silently differ depending on which part
-  # of the codebase computed them.
+  # of the codebase computed them. merge_gap = seq_len - stride collapses
+  # redundant re-detections of the same physical event across overlapping
+  # windows (see detect_transit_candidates()'s merge_gap docs) - stride
+  # here matches split_train_test()'s own stride = max(1, floor(seq_len/4)).
   rec <- record_candidates(
     y_pred = y_pred, y = y_test, star_id = star_id,
     db_conn = db_conn, table_name = "test_idx",
-    plot_file = plot_file, force = force
+    plot_file = plot_file, force = force,
+    merge_gap = seq_len - max(1, floor(seq_len / 4))
   )
   
   list(
@@ -498,10 +614,14 @@ score_star <- function(tbl_file, trained_model_paths, db_conn = NULL, plot_file 
 #' @param force If TRUE, delete any existing rows for this star in
 #'   table_name first (recompute/overwrite). If FALSE (default) and rows
 #'   already exist, nothing is written and from_cache = TRUE.
+#' @param merge_gap Passed straight through to detect_transit_candidates()
+#'   - see its docs. Callers using overlapping windows should pass
+#'   seq_len - stride so redundant re-detections of the same physical
+#'   event collapse into one candidate.
 #' @return list(candidates, from_cache)
 record_candidates <- function(y_pred, y, star_id, db_conn = NULL, table_name = "test_idx",
-                               plot_file = NULL, force = FALSE) {
-  det_res <- detect_transit_candidates(y_pred = y_pred, y = y)
+                               plot_file = NULL, force = FALSE, merge_gap = 0) {
+  det_res <- detect_transit_candidates(y_pred = y_pred, y = y, merge_gap = merge_gap)
   candidates <- det_res$candidates
   
   if (!is.null(plot_file) && !file.exists(plot_file)) {

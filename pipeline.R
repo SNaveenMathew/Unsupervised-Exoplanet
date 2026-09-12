@@ -235,18 +235,24 @@ run_pipeline <- function(data_dir = "data", seq_len = 128, train_ratio = 0.7,
       x_train_pred <- predict(model, x_train, verbose = 0)
       x_test_pred  <- predict(model, x_test, verbose = 0)
       
+      # merge_gap = seq_len - stride collapses redundant re-detections of
+      # the same physical event across overlapping windows - see
+      # detect_transit_candidates()'s merge_gap docs in util.R. stride here
+      # matches split_train_test()'s own stride = max(1, floor(seq_len/4)).
+      merge_gap <- seq_len - max(1, floor(seq_len / 4))
+      
       train_plot_file <- file.path("plots/train_pred_plot", paste0(out_name, "_train_plot.png"))
       rec_train <- record_candidates(
         y_pred = x_train_pred, y = y_train, star_id = star_id,
         db_conn = mydb, table_name = "train_idx",
-        plot_file = train_plot_file, force = just_trained
+        plot_file = train_plot_file, force = just_trained, merge_gap = merge_gap
       )
       
       test_plot_file <- file.path("plots/test_pred_plot", paste0(out_name, "_test_plot.png"))
       rec_test <- record_candidates(
         y_pred = x_test_pred, y = y_test, star_id = star_id,
         db_conn = mydb, table_name = "test_idx",
-        plot_file = test_plot_file, force = just_trained
+        plot_file = test_plot_file, force = just_trained, merge_gap = merge_gap
       )
       
       n_stars_processed <- n_stars_processed + 1L
