@@ -1,4 +1,4 @@
-# Unsupervised Exoplanet Detection using Deep Learning
+﻿# Unsupervised Exoplanet Detection using Deep Learning
 
 ## Introduction
 
@@ -54,6 +54,10 @@ There were several constraints during the execution of the project: in terms of 
 - **Fallback-Baseline Indicator**: A visible warning banner now appears above the light-curve plot whenever it's showing the zero-baseline fallback instead of a real model prediction, so it's never mistaken for a genuine result. The message is reason-specific — no trained model found for the star (star-specific or global), the Keras/reticulate backend unavailable, or a model file that exists but failed to load/run — derived live inside the same `output$trainPlot` render that already computes `y_pred`, with no extra state table.
 - **Dependency Cleanup**: Dropped an unused `imputeTS` import from `app.Rmd`'s global chunk — a leftover from the old Stineman-interpolation preprocessing that nothing in the current pipeline calls — so the dashboard no longer needs an extra, unused package installed just to start.
 - **shinydashboard UI Rework**: Rebuilt the app on `shinydashboard` (collapsible sidebar for Kepler ID selection, dashboard header with a GitHub link) with `shinyBS` tooltips on every toolbar control.
+
+## Recent pipeline updates - 2026-09-12
+
+The detection pipeline has been expanded beyond the original autoencoder-only workflow. Recent updates include a lighter-weight triage scan to screen light curves efficiently, unified candidate scoring that combines several signals into one decision path, and more robust candidate generation across noisy or irregular data segments. The pipeline also adds support for batch precomputation, export tooling for crowd-consensus training data, and additional vetting checks to separate promising transit-like dips from spurious periodic noise. Together, these changes improve the speed, consistency, and scalability of the search process while preserving the project’s unsupervised approach.
 
 ## Areas to focus
 
