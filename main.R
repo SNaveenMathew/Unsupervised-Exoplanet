@@ -2,19 +2,33 @@
 
 library(readr)
 library(reticulate)
-# Attempt to use tf_gpu conda env if present
+# Attempt to use tf_gpu conda env if present - same env name on both
+# platforms; Linux installs tensorflow+keras into it, Windows installs
+# PyTorch instead (TensorFlow dropped native Windows GPU support after
+# 2.10, while PyTorch maintains full current-CUDA support on Windows).
+# See util.R's "Cross-platform deep-learning backend" section (dl_backend()
+# and friends) for how the rest of this pipeline dispatches on that.
 tryCatch({
   reticulate::use_condaenv("tf_gpu", required = FALSE)
 }, error = function(e) {
-  # Fall back to default python/keras environment
+  # Fall back to default python environment
 })
 
-library(keras)
 library(reshape2)
 library(dplyr)
 library(docopt)
 library(RSQLite)
 source("util.R")
+
+# keras (the R package) is only needed on the Linux/TensorFlow path -
+# loaded conditionally so a Windows machine with only reticulate + Python's
+# torch installed (no keras R package at all) doesn't fail just from
+# starting this script. Must come after source("util.R") so dl_backend()
+# is defined.
+if (identical(dl_backend(), "keras")) {
+  library(keras)
+}
+
 source("pipeline.R")
 
 doc <- "Usage: main.R [--PATH=<data_dir>] [--seq_len=<len>] [--batch_size=<bs>] [--epochs=<ep>] [--run_hrs=<hrs>] [--db=<db_file>]

@@ -28,7 +28,7 @@ read_kepler_table <- function(file) {
     cols <- NULL
     data_start <- 35
   }
-  
+
   df <- suppressWarnings(
     read_table(file, skip = data_start - 1, col_names = FALSE, show_col_types = FALSE)
   )
@@ -39,7 +39,7 @@ read_kepler_table <- function(file) {
     # Fallback to standard Kepler DV table column mapping
     colnames(df)[1:min(ncol(df), length(cols))] <- cols[1:min(ncol(df), length(cols))]
   }
-  
+
   # Ensure standard column names exist
   col_names_upper <- toupper(colnames(df))
   time_col <- grep("TIME", col_names_upper, value = TRUE)[1]
@@ -149,7 +149,7 @@ extract_windows <- function(cleaned_df, seq_len = 128, stride = 16) {
   if(is.null(cleaned_df) || nrow(cleaned_df) < seq_len) {
     return(list(X = array(0, dim = c(0, seq_len, 1)), meta = data.frame()))
   }
-  
+
   chunks <- split(cleaned_df, cleaned_df$chunk_id)
   
   for(chk in chunks) {
@@ -498,9 +498,11 @@ triage_scan <- function(flux, sigma_thresh = 3.0, min_duration = 2, max_duration
 #' responsible for surfacing fallback_reason/triage in whatever UI it has.
 #'
 #' @param tbl_file Path to the star's .tbl file
-#' @param trained_model_paths Character vector of candidate .hdf5 paths to
-#'   try in order (e.g. star-specific first, then a global fallback model).
-#'   The first one that exists on disk is used.
+#' @param trained_model_paths Character vector of candidate model file
+#'   paths to try in order (e.g. star-specific first, then a global
+#'   fallback model). The first one that exists on disk is used. Build
+#'   this with dl_model_candidate_paths() so the extension matches the
+#'   active backend (.hdf5 for Keras on Linux, .pt for PyTorch on Windows).
 #' @param db_conn Open DBI connection to the exoplanet_db.sqlite database
 #'   (for the test_idx cache table). Pass NULL to skip DB caching entirely
 #'   (e.g. a dry run).
@@ -515,6 +517,445 @@ triage_scan <- function(flux, sigma_thresh = 3.0, min_duration = 2, max_duration
 #'   for this star even if it's already cached
 #' @return list(kepler_id, out_base, y_test, x_test, test_vec, y_pred,
 #'   candidates, fallback_reason, triage, from_cache)
+#' ---------------------------------------------------------------------
+#' Cross-platform deep-learning backend (Keras/TensorFlow on Linux,
+#' PyTorch on Windows)
+#' ---------------------------------------------------------------------
+#' TensorFlow dropped native Windows GPU support after 2.10 (Windows users
+#' are stuck on an old, unmaintained TF build unless they go through WSL2),
+#' while PyTorch maintains full current-CUDA support natively on Windows.
+#' Every function below dispatches on dl_backend() so the rest of this
+#' file, pipeline.R, and app.Rmd never need to know which one is active -
+#' they just call dl_fit()/dl_predict()/dl_save()/dl_load(), and get back
+#' the same shapes either way. Both backends are expected to live in the
+#' SAME-named Python virtual/conda environment (whatever main.R's
+#' reticulate::use_condaenv() call points at) - only which package is
+#' installed inside it differs by OS.
+
+#' Which backend this OS should use. Override with the EXOPLANET_DL_BACKEND
+#' environment variable (e.g. Sys.setenv(EXOPLANET_DL_BACKEND = "torch") to
+#' exercise the PyTorch path from Linux, mainly useful for testing).
+#'
+#' @return "torch" or "keras"
+dl_backend <- function() {
+  override <- Sys.getenv("EXOPLANET_DL_BACKEND", "")
+  if (nzchar(override)) return(tolower(override))
+  if (identical(.Platform$OS.type, "windows")) "torch" else "keras"
+}
+
+#' File extension for a saved model under the given (default: current)
+#' backend. A model trained with one backend can never be loaded by the
+#' other - they're fundamentally different serialization formats - so a
+#' star trained on Linux (.hdf5) and then worked on again on Windows
+#' (.pt) will simply retrain fresh under the new backend rather than
+#' erroring; see dl_model_candidate_paths().
+dl_model_ext <- function(backend = dl_backend()) {
+  if (identical(backend, "torch")) ".pt" else ".hdf5"
+}
+
+#' Candidate model file paths to check for a star, in priority order
+#' (star-specific first, then the shared global fallback), using whichever
+#' extension matches the active backend. Callers typically call this once
+#' per models_dir candidate (e.g. "trained_models" and "../trained_models")
+#' and concatenate, mirroring how the two locations are already tried
+#' elsewhere in this codebase.
+dl_model_candidate_paths <- function(models_dir, out_base, backend = dl_backend()) {
+  ext <- dl_model_ext(backend)
+  c(
+    file.path(models_dir, paste0(out_base, ext)),
+    file.path(models_dir, paste0("global_conv1d_autoencoder", ext))
+  )
+}
+
+#' Whether the active (or given) backend can actually be used right now -
+#' the package (keras) or reticulate+the Python module (torch) is
+#' installed and importable. Wrapped in tryCatch so a missing/broken
+#' Python environment degrades to FALSE rather than erroring.
+dl_backend_available <- function(backend = dl_backend()) {
+  if (identical(backend, "torch")) {
+    isTRUE(tryCatch({
+      requireNamespace("reticulate", quietly = TRUE) &&
+        reticulate::py_module_available("torch")
+    }, error = function(e) FALSE))
+  } else {
+    requireNamespace("keras", quietly = TRUE)
+  }
+}
+
+#' Reports (and where possible enables) mixed-precision training for the
+#' active backend if a GPU is present. On a GPU with tensor cores (compute
+#' capability 7.0+ - any RTX/V100/A-series/H-series card), this roughly
+#' doubles the achievable batch size or model capacity for a fixed memory
+#' budget, at essentially no accuracy cost for a model this size - directly
+#' relevant when training on a single 16GB GPU. Skipped automatically on
+#' CPU-only setups, where fp16 ops aren't hardware-accelerated and mixed
+#' precision provides no benefit (and can even be slightly slower).
+#'
+#' The two backends apply this completely differently: Keras/TF uses a
+#' single global policy set once, up front (below). PyTorch has no
+#' equivalent global switch - autocast is applied per training step inside
+#' dl_fit_torch() itself - so for the torch backend this function only
+#' detects and reports GPU presence; the returned value is what callers
+#' (run_pipeline()) should pass through to dl_fit() as use_amp.
+#'
+#' @return TRUE if a GPU was detected (and, for Keras, mixed precision was
+#'   successfully enabled), FALSE otherwise (invisible)
+dl_enable_mixed_precision <- function(backend = dl_backend()) {
+  if (identical(backend, "torch")) {
+    has_gpu <- tryCatch({
+      requireNamespace("reticulate", quietly = TRUE) &&
+        reticulate::py_module_available("torch") &&
+        isTRUE(reticulate::import("torch")$cuda$is_available())
+    }, error = function(e) FALSE)
+    if (has_gpu) {
+      message("GPU detected - PyTorch will use mixed-precision autocast during training.")
+    } else {
+      message("No GPU detected - training in default (fp32) precision.")
+    }
+    return(invisible(has_gpu))
+  }
+
+  has_gpu <- tryCatch({
+    length(tensorflow::tf$config$list_physical_devices("GPU")) > 0
+  }, error = function(e) FALSE)
+
+  if (!has_gpu) {
+    message("No GPU detected - training in default (fp32) precision.")
+    return(invisible(FALSE))
+  }
+
+  ok <- tryCatch({
+    tensorflow::tf$keras$mixed_precision$set_global_policy("mixed_float16")
+    message("GPU detected - enabled mixed_float16 precision for training.")
+    TRUE
+  }, error = function(e) {
+    message("Mixed precision not available (", conditionMessage(e), ") - continuing in default precision.")
+    FALSE
+  })
+  invisible(ok)
+}
+
+#' Build a 1D Convolutional Autoencoder for light curve reconstruction
+#' (Keras/TensorFlow implementation - see build_conv1d_autoencoder_torch()
+#' for the PyTorch equivalent; dl_fit() dispatches to whichever is active).
+#'
+#' @param seq_len Sequence window length (default: 128)
+#' @param lr Learning rate for Adam optimizer (default: 0.001)
+#' @return Compiled Keras model
+build_conv1d_autoencoder_keras <- function(seq_len = 128, lr = 0.001) {
+  model <- keras_model_sequential() %>%
+    # Encoder
+    layer_conv_1d(filters = 32, kernel_size = 5, padding = "same", activation = "relu",
+                  input_shape = c(seq_len, 1)) %>%
+    layer_max_pooling_1d(pool_size = 2) %>%
+    layer_conv_1d(filters = 64, kernel_size = 5, padding = "same", activation = "relu") %>%
+    layer_max_pooling_1d(pool_size = 2) %>%
+    layer_conv_1d(filters = 128, kernel_size = 3, padding = "same", activation = "relu") %>%
+    layer_max_pooling_1d(pool_size = 2) %>%
+
+    # Bottleneck representation
+    layer_conv_1d(filters = 128, kernel_size = 3, padding = "same", activation = "relu") %>%
+
+    # Decoder
+    layer_upsampling_1d(size = 2) %>%
+    layer_conv_1d(filters = 64, kernel_size = 5, padding = "same", activation = "relu") %>%
+    layer_upsampling_1d(size = 2) %>%
+    layer_conv_1d(filters = 32, kernel_size = 5, padding = "same", activation = "relu") %>%
+    layer_upsampling_1d(size = 2) %>%
+    # Forced to float32 even under a mixed_float16 global policy - standard
+    # mixed-precision practice: keeping the last layer's activation/loss
+    # computation in float32 avoids numerical instability (e.g. NaN loss)
+    # that a linear output layer combined with MSE loss can hit in fp16,
+    # while every earlier layer still gets the fp16 speed/memory benefit.
+    layer_conv_1d(filters = 1, kernel_size = 5, padding = "same", activation = "linear", dtype = "float32")
+
+  model %>% compile(
+    loss = "mse",
+    optimizer = optimizer_adam(learning_rate = lr),
+    metrics = c("mae")
+  )
+
+  return(model)
+}
+
+#' Trains a fresh Keras autoencoder, matching build_conv1d_autoencoder_
+#' keras()'s architecture. Returns a history object exposing
+#' $metrics$loss/$mae/$val_loss/$val_mae, the same shape dl_fit_torch()
+#' below produces, so pipeline.R never needs to know which backend ran.
+dl_fit_keras <- function(x_train, y_train, seq_len, batch_size, epochs, lr = 0.001,
+                          validation_split = 0.2) {
+  model <- build_conv1d_autoencoder_keras(seq_len = seq_len, lr = lr)
+
+  callbacks_list <- list(
+    callback_early_stopping(monitor = "val_loss", patience = 5, restore_best_weights = TRUE),
+    callback_reduce_lr_on_plateau(monitor = "val_loss", factor = 0.5, patience = 2)
+  )
+
+  his <- model %>% fit(
+    x = x_train, y = y_train,
+    batch_size = min(batch_size, dim(x_train)[1]),
+    epochs = epochs,
+    validation_split = validation_split,
+    callbacks = callbacks_list,
+    verbose = 0
+  )
+
+  list(model = model, history = his$metrics)
+}
+
+#' ---------------------------------------------------------------------
+#' PyTorch backend (Windows)
+#' ---------------------------------------------------------------------
+#' PyTorch has no Keras-style declarative build-then-fit() API, so the
+#' model definition and training loop are written as an actual Python
+#' script (below) and executed once per session via reticulate::
+#' py_run_string(), rather than assembled through many chained reticulate
+#' calls into torch$nn$* - far more readable and maintainable than the
+#' equivalent would be built up piece by piece from R, and it's the kind
+#' of code that's naturally idiomatic in Python anyway (batching loop,
+#' autocast context manager, early stopping bookkeeping). R just prepares
+#' the data and hyperparameters, calls in, and reads the results back -
+#' reticulate converts the R arrays to numpy automatically at the boundary.
+#'
+#' Mirrors the Keras path's behavior specifically where it matters for
+#' parity between backends: validation_split takes the LAST fraction of
+#' the (unshuffled) data, matching Keras's own documented behavior, not a
+#' random split; early stopping restores the best-validation-loss weights
+#' (restore_best_weights=TRUE in the Keras callback); LR reduces on a
+#' validation-loss plateau; mixed precision uses torch.autocast + a
+#' GradScaler when use_amp is TRUE (passed in by dl_enable_mixed_
+#' precision()'s return value), analogous to Keras's global mixed_float16
+#' policy. The channels-first/channels-last transpose PyTorch's Conv1d
+#' requires versus this codebase's (n_windows, seq_len, 1) convention
+#' everywhere else is handled entirely inside this script - nothing
+#' outside dl_fit_torch()/dl_predict_torch() ever sees a channels-first
+#' array.
+.torch_backend_ready <- new.env()
+.torch_backend_ready$done <- FALSE
+
+.torch_training_script <- "
+import torch
+import torch.nn as nn
+import numpy as np
+
+def build_autoencoder(seq_len):
+    return nn.Sequential(
+        nn.Conv1d(1, 32, kernel_size=5, padding='same'), nn.ReLU(),
+        nn.MaxPool1d(2),
+        nn.Conv1d(32, 64, kernel_size=5, padding='same'), nn.ReLU(),
+        nn.MaxPool1d(2),
+        nn.Conv1d(64, 128, kernel_size=3, padding='same'), nn.ReLU(),
+        nn.MaxPool1d(2),
+        nn.Conv1d(128, 128, kernel_size=3, padding='same'), nn.ReLU(),
+        nn.Upsample(scale_factor=2, mode='nearest'),
+        nn.Conv1d(128, 64, kernel_size=5, padding='same'), nn.ReLU(),
+        nn.Upsample(scale_factor=2, mode='nearest'),
+        nn.Conv1d(64, 32, kernel_size=5, padding='same'), nn.ReLU(),
+        nn.Upsample(scale_factor=2, mode='nearest'),
+        nn.Conv1d(32, 1, kernel_size=5, padding='same'),
+    )
+
+def _to_channels_first(x):
+    t = torch.from_numpy(np.asarray(x, dtype=np.float32))
+    return t.permute(0, 2, 1).contiguous()
+
+def _to_channels_last_numpy(t):
+    return t.permute(0, 2, 1).contiguous().cpu().numpy()
+
+def train_autoencoder(x_train, y_train, seq_len, epochs=20, batch_size=256, lr=0.001,
+                       patience=5, lr_patience=2, lr_factor=0.5, val_split=0.2,
+                       use_amp=False, seed=0):
+    torch.manual_seed(seed)
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+    x = _to_channels_first(x_train).to(device)
+    y = _to_channels_first(y_train).to(device)
+
+    n = x.shape[0]
+    n_val = max(1, int(n * val_split)) if n > 1 else 0
+    n_tr = max(1, n - n_val)
+    # Keras's validation_split takes the LAST fraction of the (unshuffled)
+    # data, not a random split - matched here for behavioral parity.
+    x_tr, y_tr = x[:n_tr], y[:n_tr]
+    x_val, y_val = (x[n_tr:], y[n_tr:]) if n_val > 0 and n_tr < n else (None, None)
+
+    model = build_autoencoder(seq_len).to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    loss_fn = nn.MSELoss()
+    mae_fn = nn.L1Loss()
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode='min', factor=lr_factor, patience=lr_patience)
+    amp_enabled = bool(use_amp) and device.type == 'cuda'
+    scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
+
+    history = {'loss': [], 'mae': [], 'val_loss': [], 'val_mae': []}
+    best_val = float('inf')
+    best_state = None
+    epochs_no_improve = 0
+    n_batches = max(1, (n_tr + batch_size - 1) // batch_size)
+
+    for epoch in range(int(epochs)):
+        model.train()
+        perm = torch.randperm(n_tr, device=device)
+        running_loss = 0.0
+        running_mae = 0.0
+        for b in range(n_batches):
+            idx = perm[b*batch_size:(b+1)*batch_size]
+            if idx.numel() == 0:
+                continue
+            xb, yb = x_tr[idx], y_tr[idx]
+            optimizer.zero_grad()
+            with torch.autocast(device_type=device.type, enabled=amp_enabled):
+                pred = model(xb)
+                loss = loss_fn(pred, yb)
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
+            running_loss += loss.item() * xb.shape[0]
+            running_mae += mae_fn(pred, yb).item() * xb.shape[0]
+
+        train_loss = running_loss / n_tr
+        train_mae = running_mae / n_tr
+
+        if x_val is not None:
+            model.eval()
+            with torch.no_grad():
+                val_pred = model(x_val)
+                val_loss = loss_fn(val_pred, y_val).item()
+                val_mae = mae_fn(val_pred, y_val).item()
+        else:
+            val_loss, val_mae = train_loss, train_mae
+
+        history['loss'].append(train_loss)
+        history['mae'].append(train_mae)
+        history['val_loss'].append(val_loss)
+        history['val_mae'].append(val_mae)
+
+        scheduler.step(val_loss)
+
+        if val_loss < best_val - 1e-7:
+            best_val = val_loss
+            best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
+            epochs_no_improve = 0
+        else:
+            epochs_no_improve += 1
+            if epochs_no_improve >= patience:
+                break
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+
+    return model, history
+
+def predict_autoencoder(model, x):
+    device = next(model.parameters()).device
+    model.eval()
+    with torch.no_grad():
+        xt = _to_channels_first(x).to(device)
+        pred = model(xt)
+    return _to_channels_last_numpy(pred)
+
+def save_autoencoder(model, path):
+    torch.save(model, path)
+
+def load_autoencoder(path):
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    m = torch.load(path, map_location=device, weights_only=False)
+    m.eval()
+    return m
+"
+
+#' Defines the Python-side functions in .torch_training_script (once per R
+#' session) via reticulate. Every dl_*_torch() function calls this first.
+ensure_torch_backend <- function() {
+  if (isTRUE(.torch_backend_ready$done)) return(invisible(TRUE))
+  reticulate::py_run_string(.torch_training_script)
+  .torch_backend_ready$done <- TRUE
+  invisible(TRUE)
+}
+
+#' Untrained PyTorch autoencoder matching build_conv1d_autoencoder_keras()'s
+#' architecture. Exists for symmetry/standalone use; dl_fit_torch() builds
+#' and trains its own model internally (PyTorch has no separate compile()
+#' step), so ordinary training never needs to call this directly.
+build_conv1d_autoencoder_torch <- function(seq_len = 128) {
+  ensure_torch_backend()
+  reticulate::py$build_autoencoder(as.integer(seq_len))
+}
+
+#' Trains a fresh PyTorch autoencoder. Returns list(model, history) with
+#' the same $loss/$mae/$val_loss/$val_mae shape dl_fit_keras() produces.
+#'
+#' @param use_amp Whether to use mixed-precision autocast (only takes
+#'   effect on a CUDA device; silently ignored on CPU). Pass the return
+#'   value of dl_enable_mixed_precision() here.
+dl_fit_torch <- function(x_train, y_train, seq_len, batch_size, epochs, lr = 0.001,
+                          validation_split = 0.2, use_amp = FALSE) {
+  ensure_torch_backend()
+  result <- reticulate::py$train_autoencoder(
+    x_train = x_train, y_train = y_train, seq_len = as.integer(seq_len),
+    epochs = as.integer(epochs), batch_size = as.integer(batch_size), lr = lr,
+    val_split = validation_split, use_amp = isTRUE(use_amp)
+  )
+  history <- result[[2]]
+  list(model = result[[1]], history = list(
+    loss = unlist(history$loss), mae = unlist(history$mae),
+    val_loss = unlist(history$val_loss), val_mae = unlist(history$val_mae)
+  ))
+}
+
+dl_predict_torch <- function(model, x) {
+  ensure_torch_backend()
+  reticulate::py$predict_autoencoder(model, x)
+}
+
+dl_save_torch <- function(model, filepath) {
+  ensure_torch_backend()
+  reticulate::py$save_autoencoder(model, filepath)
+}
+
+dl_load_torch <- function(filepath) {
+  ensure_torch_backend()
+  reticulate::py$load_autoencoder(filepath)
+}
+
+#' ---------------------------------------------------------------------
+#' Unified dispatchers - pipeline.R and score_star() call only these
+#' ---------------------------------------------------------------------
+
+#' Builds AND trains a fresh autoencoder, dispatching to Keras or PyTorch.
+#' Always returns list(model, history) where history has $loss, $mae,
+#' $val_loss, $val_mae (one value per epoch actually run), regardless of
+#' backend.
+dl_fit <- function(x_train, y_train, seq_len = 128, batch_size = 256, epochs = 20,
+                    lr = 0.001, validation_split = 0.2, use_amp = FALSE,
+                    backend = dl_backend()) {
+  if (identical(backend, "torch")) {
+    dl_fit_torch(x_train, y_train, seq_len, batch_size, epochs, lr, validation_split, use_amp)
+  } else {
+    dl_fit_keras(x_train, y_train, seq_len, batch_size, epochs, lr, validation_split)
+  }
+}
+
+#' Runs inference with an already-loaded model, dispatching to Keras or
+#' PyTorch. Always takes/returns the same (n_windows, seq_len, 1) shape
+#' used everywhere else in this codebase.
+dl_predict <- function(model, x, backend = dl_backend()) {
+  if (identical(backend, "torch")) dl_predict_torch(model, x) else predict(model, x, verbose = 0)
+}
+
+#' Saves a trained model to filepath, dispatching to Keras (.hdf5) or
+#' PyTorch (.pt) based on the extension dl_model_ext() already put there.
+dl_save <- function(model, filepath, backend = dl_backend()) {
+  if (identical(backend, "torch")) dl_save_torch(model, filepath) else keras::save_model_hdf5(model, filepath)
+}
+
+#' Loads a previously-saved model from filepath, dispatching the same way
+#' dl_save() does.
+dl_load <- function(filepath, backend = dl_backend()) {
+  if (identical(backend, "torch")) dl_load_torch(filepath) else keras::load_model_hdf5(filepath)
+}
+
 score_star <- function(tbl_file, trained_model_paths, db_conn = NULL, plot_file = NULL,
                         seq_len = 128, train_ratio = 0.7, cadence_days = 29.4 / 1440,
                         triage_sigma = 3.0, force = FALSE) {
@@ -549,12 +990,12 @@ score_star <- function(tbl_file, trained_model_paths, db_conn = NULL, plot_file 
     valid_mdl <- trained_model_paths[file.exists(trained_model_paths)][1]
     if (is.na(valid_mdl)) {
       fallback_reason <- "no_model"
-    } else if (!requireNamespace("keras", quietly = TRUE)) {
-      fallback_reason <- "no_keras"
+    } else if (!dl_backend_available()) {
+      fallback_reason <- "no_backend"
     } else {
       pred_or_err <- tryCatch({
-        model <- keras::load_model_hdf5(valid_mdl)
-        predict(model, x_test, verbose = 0)
+        model <- dl_load(valid_mdl)
+        dl_predict(model, x_test)
       }, error = function(e) e)
       if (inherits(pred_or_err, "error")) {
         fallback_reason <- "load_error"

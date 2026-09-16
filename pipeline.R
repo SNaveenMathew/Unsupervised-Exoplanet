@@ -1,88 +1,27 @@
 # Modernized Exoplanet Detection Pipeline with 1D-CNN Autoencoder & GPU Acceleration
+#
+# Cross-platform: Keras/TensorFlow on Linux (native GPU support), PyTorch
+# on Windows (TensorFlow dropped native Windows GPU support after 2.10;
+# PyTorch maintains full current-CUDA support on Windows). Both backends
+# are expected to live in the SAME-named Python environment (whatever
+# main.R's reticulate::use_condaenv() points at) - only which package is
+# installed inside it differs by OS. See util.R's "Cross-platform deep-
+# learning backend" section for dl_backend()/dl_fit()/dl_predict()/
+# dl_save()/dl_load() and everything else this file dispatches through;
+# nothing below needs to know which backend is actually running.
 
 library(readr)
 library(dplyr)
 library(RSQLite)
-library(keras)
 library(reshape2)
 source("util.R")
 
-#' Enable mixed-precision (fp16 compute / fp32 master weights) training when
-#' a GPU is available.
-#'
-#' On a GPU with tensor cores (compute capability 7.0+ - any RTX/V100/
-#' A-series/H-series card), this roughly doubles the achievable batch size
-#' or model capacity for a fixed memory budget, at essentially no accuracy
-#' cost for a model this size - directly relevant when training on a single
-#' 16GB GPU. Skipped automatically on CPU-only setups, where fp16 ops
-#' aren't hardware-accelerated and mixed precision provides no benefit (and
-#' can even be slightly slower), and skipped gracefully if the installed
-#' TF/Keras build doesn't support it. See build_conv1d_autoencoder()'s final
-#' layer for the matching float32-output requirement this needs to stay
-#' numerically stable.
-#'
-#' @return TRUE if mixed precision was enabled, FALSE otherwise (invisible)
-enable_mixed_precision_if_available <- function() {
-  has_gpu <- tryCatch({
-    length(tensorflow::tf$config$list_physical_devices("GPU")) > 0
-  }, error = function(e) FALSE)
-  
-  if (!has_gpu) {
-    message("No GPU detected - training in default (fp32) precision.")
-    return(invisible(FALSE))
-  }
-  
-  ok <- tryCatch({
-    tensorflow::tf$keras$mixed_precision$set_global_policy("mixed_float16")
-    message("GPU detected - enabled mixed_float16 precision for training.")
-    TRUE
-  }, error = function(e) {
-    message("Mixed precision not available (", conditionMessage(e), ") - continuing in default precision.")
-    FALSE
-  })
-  invisible(ok)
-}
-
-#' Build a 1D Convolutional Autoencoder for light curve reconstruction
-#'
-#' @param seq_len Sequence window length (default: 128)
-#' @param lr Learning rate for Adam optimizer (default: 0.001)
-#' @return Compiled Keras model
-build_conv1d_autoencoder <- function(seq_len = 128, lr = 0.001) {
-  model <- keras_model_sequential() %>%
-    # Encoder
-    layer_conv_1d(filters = 32, kernel_size = 5, padding = "same", activation = "relu",
-                  input_shape = c(seq_len, 1)) %>%
-    layer_max_pooling_1d(pool_size = 2) %>%
-    layer_conv_1d(filters = 64, kernel_size = 5, padding = "same", activation = "relu") %>%
-    layer_max_pooling_1d(pool_size = 2) %>%
-    layer_conv_1d(filters = 128, kernel_size = 3, padding = "same", activation = "relu") %>%
-    layer_max_pooling_1d(pool_size = 2) %>%
-    
-    # Bottleneck representation
-    layer_conv_1d(filters = 128, kernel_size = 3, padding = "same", activation = "relu") %>%
-    
-    # Decoder
-    layer_upsampling_1d(size = 2) %>%
-    layer_conv_1d(filters = 64, kernel_size = 5, padding = "same", activation = "relu") %>%
-    layer_upsampling_1d(size = 2) %>%
-    layer_conv_1d(filters = 32, kernel_size = 5, padding = "same", activation = "relu") %>%
-    layer_upsampling_1d(size = 2) %>%
-    # Forced to float32 even under a mixed_float16 global policy (see
-    # enable_mixed_precision_if_available() above) - standard mixed-
-    # precision practice: keeping the last layer's activation/loss
-    # computation in float32 avoids numerical instability (e.g. NaN loss)
-    # that a linear output layer combined with MSE loss can hit in fp16,
-    # while every earlier layer still gets the fp16 speed/memory benefit.
-    layer_conv_1d(filters = 1, kernel_size = 5, padding = "same", activation = "linear", dtype = "float32")
-  
-  model %>% compile(
-    loss = "mse",
-    optimizer = optimizer_adam(learning_rate = lr),
-    metrics = c("mae")
-  )
-  
-  return(model)
+# keras is only needed on the Linux/TensorFlow path. Loaded conditionally
+# so a Windows machine with no keras R package installed at all (it only
+# needs reticulate + Python's torch there) doesn't fail just from sourcing
+# this file.
+if (identical(dl_backend(), "keras")) {
+  library(keras)
 }
 
 #' Run the complete Unsupervised Exoplanet Detection Pipeline
@@ -99,7 +38,10 @@ run_pipeline <- function(data_dir = "data", seq_len = 128, train_ratio = 0.7,
                          batch_size = 256, epochs = 20, run_hrs = 8,
                          db_file = "shiny/exoplanet_db.sqlite") {
   
-  enable_mixed_precision_if_available()
+  backend <- dl_backend()
+  message("Deep-learning backend: ", backend,
+          if (identical(backend, "torch")) " (PyTorch, Windows)" else " (Keras/TensorFlow, Linux)")
+  use_amp <- dl_enable_mixed_precision(backend)
   
   # Ensure output directories exist
   dir.create("plots/learning_curve", showWarnings = FALSE, recursive = TRUE)
@@ -130,12 +72,7 @@ run_pipeline <- function(data_dir = "data", seq_len = 128, train_ratio = 0.7,
   }
   
   out_names <- tools::file_path_sans_ext(file_basenames)
-  
-  # Callbacks for training
-  callbacks_list <- list(
-    callback_early_stopping(monitor = "val_loss", patience = 5, restore_best_weights = TRUE),
-    callback_reduce_lr_on_plateau(monitor = "val_loss", factor = 0.5, patience = 2)
-  )
+  mdl_ext <- dl_model_ext(backend)
   
   tm_start <- Sys.time()
   metrics_df <- data.frame()
@@ -180,40 +117,48 @@ run_pipeline <- function(data_dir = "data", seq_len = 128, train_ratio = 0.7,
         next
       }
       
-      mdl_file <- file.path("trained_models", paste0(out_name, ".hdf5"))
+      # dl_model_ext() picks .hdf5 (Keras) or .pt (PyTorch) to match the
+      # active backend - a model trained under the OTHER backend during a
+      # previous session on the other OS is simply not found here and
+      # gets retrained fresh; the two formats can't load into each other.
+      mdl_file <- file.path("trained_models", paste0(out_name, mdl_ext))
       just_trained <- !file.exists(mdl_file)
       
-      # 3. Model Training / Loading
+      # 3. Model Training / Loading - dl_fit()/dl_load() dispatch to
+      # Keras or PyTorch (see util.R); both return/accept the same shapes
+      # either way, so nothing below this point needs to know which ran.
       if(just_trained) {
-        model <- build_conv1d_autoencoder(seq_len = seq_len)
-        
-        his <- model %>% fit(
-          x = x_train, y = y_train,
-          batch_size = min(batch_size, dim(x_train)[1]),
-          epochs = epochs,
-          validation_split = 0.2,
-          callbacks = callbacks_list,
-          verbose = 0
+        fit_result <- dl_fit(
+          x_train = x_train, y_train = y_train, seq_len = seq_len,
+          batch_size = batch_size, epochs = epochs, validation_split = 0.2,
+          use_amp = use_amp, backend = backend
         )
+        model <- fit_result$model
+        his <- fit_result$history
         
-        save_model_hdf5(model, mdl_file)
+        dl_save(model, mdl_file, backend = backend)
         
         # Save learning curve plot
         png(file.path("plots/learning_curve", paste0(out_name, "_learning.png")),
             width = 1366, height = 768)
-        print(plot(his))
+        plot(his$loss, type = "l", col = "dodgerblue", lwd = 2,
+             ylim = range(c(his$loss, his$val_loss), finite = TRUE),
+             xlab = "Epoch", ylab = "Loss", main = paste("Training History -", out_name))
+        lines(his$val_loss, col = "firebrick", lwd = 2, lty = 2)
+        legend("topright", legend = c("Training loss", "Validation loss"),
+               col = c("dodgerblue", "firebrick"), lty = c(1, 2), lwd = 2)
         dev.off()
         
-        ep_actual <- length(his$metrics$loss)
+        ep_actual <- length(his$loss)
         metrics_df <- rbind(metrics_df, data.frame(
           file = file,
-          train_loss = his$metrics$loss[ep_actual],
-          train_mae  = his$metrics$mae[ep_actual],
-          val_loss   = his$metrics$val_loss[ep_actual],
-          val_mae    = his$metrics$val_mae[ep_actual]
+          train_loss = his$loss[ep_actual],
+          train_mae  = his$mae[ep_actual],
+          val_loss   = his$val_loss[ep_actual],
+          val_mae    = his$val_mae[ep_actual]
         ))
       } else {
-        model <- load_model_hdf5(mdl_file)
+        model <- dl_load(mdl_file, backend = backend)
       }
       
       # 4. Asymmetric Transit Candidate Detection on Train & Test sets,
@@ -232,8 +177,8 @@ run_pipeline <- function(data_dir = "data", seq_len = 128, train_ratio = 0.7,
       # re-running the whole pipeline over an already-processed data_dir
       # safe (no duplicate rows), which the original accumulate-then-
       # dbWriteTable/insert_into_db approach did not guarantee.
-      x_train_pred <- predict(model, x_train, verbose = 0)
-      x_test_pred  <- predict(model, x_test, verbose = 0)
+      x_train_pred <- dl_predict(model, x_train, backend = backend)
+      x_test_pred  <- dl_predict(model, x_test, backend = backend)
       
       # merge_gap = seq_len - stride collapses redundant re-detections of
       # the same physical event across overlapping windows - see

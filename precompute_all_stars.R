@@ -26,7 +26,7 @@
 #   |-- precompute_all_stars.R   <- this file
 #   |-- export_training_data.R
 #   |-- data/*.tbl
-#   |-- trained_models/*.hdf5
+#   |-- trained_models/*.hdf5 (Keras/Linux) or *.pt (PyTorch/Windows)
 #   `-- shiny/
 #       |-- app.Rmd
 #       `-- exoplanet_db.sqlite  <- default DB location (matches main.R's --db default)
@@ -86,10 +86,7 @@ n_scored <- 0L; n_cached <- 0L; n_triage_skip <- 0L; n_errors <- 0L
 
 for (f in all_tbl) {
   out_base <- tools::file_path_sans_ext(basename(f))
-  mdl_candidates <- c(
-    file.path(models_dir, paste0(out_base, ".hdf5")),
-    file.path(models_dir, "global_conv1d_autoencoder.hdf5")
-  )
+  mdl_candidates <- dl_model_candidate_paths(models_dir, out_base)
   
   res <- tryCatch(
     score_star(tbl_file = f, trained_model_paths = mdl_candidates,
