@@ -1029,7 +1029,7 @@ server = function(input, output, session) {
   tag_save_trigger <- reactiveVal(0)
   
   # NULL whenever the most recent trainPlot render used a real model
-  # prediction; otherwise one of "no_model" / "no_keras" / "load_error",
+  # prediction; otherwise one of "no_model" / "no_backend" / "load_error",
   # set live inside output$trainPlot so output$model_fallback_banner can
   # warn that the plot is showing a flat zero baseline, not a real result.
   model_fallback_state <- reactiveVal(NULL)
@@ -1300,11 +1300,11 @@ server = function(input, output, session) {
     dir.create(plots_dir, showWarnings = FALSE, recursive = TRUE)
     plot_file <- file.path(plots_dir, paste0(out_base, "_test_plot.png"))
     
+    # dl_model_candidate_paths() (util.R) picks .hdf5 or .pt to match the
+    # active backend (Keras/Linux vs PyTorch/Windows) - see its docs.
     mdl_candidates <- c(
-      file.path("trained_models", paste0(out_base, ".hdf5")),
-      file.path("../trained_models", paste0(out_base, ".hdf5")),
-      file.path("trained_models", "global_conv1d_autoencoder.hdf5"),
-      file.path("../trained_models", "global_conv1d_autoencoder.hdf5")
+      dl_model_candidate_paths("trained_models", out_base),
+      dl_model_candidate_paths("../trained_models", out_base)
     )
     
     # score_star() (in util.R) is the single shared implementation of
@@ -1426,7 +1426,8 @@ server = function(input, output, session) {
     
     msg <- switch(reason,
       "no_model"   = "No trained model found for this star (star-specific or global fallback) \u2014 showing a flat zero baseline, not a real prediction.",
-      "no_keras"   = "The Keras/reticulate backend is not available on this server \u2014 showing a flat zero baseline, not a real prediction.",
+      "no_backend" = sprintf("The %s backend is not available on this server \u2014 showing a flat zero baseline, not a real prediction.",
+                             if (identical(dl_backend(), "torch")) "PyTorch/reticulate" else "Keras/reticulate"),
       "load_error" = "A trained model file exists for this star but failed to load or run \u2014 showing a flat zero baseline, not a real prediction.",
       "Showing a flat zero baseline, not a real model prediction.")
     div(style = "background:#fff3cd; border:1px solid #ffe69c; color:#664d03; border-radius:6px; padding:8px 14px; margin-bottom:12px; font-size:0.9em; display:flex; align-items:center; gap:8px;",
