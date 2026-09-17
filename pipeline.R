@@ -20,6 +20,12 @@ source("util.R")
 # so a Windows machine with no keras R package installed at all (it only
 # needs reticulate + Python's torch there) doesn't fail just from sourcing
 # this file.
+library(reticulate)
+tryCatch({
+  reticulate::use_condaenv("tf_gpu", required = FALSE)
+}, error = function(e) {
+  # Fall back to default python environment
+})
 if (identical(dl_backend(), "keras")) {
   library(keras)
 }
