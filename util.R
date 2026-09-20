@@ -551,13 +551,34 @@ detect_transit_candidates <- function(y_pred, y, sigma_thresh = 2.5, min_duratio
   
   cand_df <- data.frame(start = starts, end = ends)
   
-  # Collapse redundant re-detections of the same physical event across overlapping windows
-  if (merge_gap > 0 && nrow(cand_df) > 1) {
-    cand_df <- cand_df[order(cand_df$start), ]
-    gaps <- c(Inf, diff(cand_df$start))
-    group_id <- cumsum(gaps > merge_gap)
-    cand_df <- cand_df[!duplicated(group_id), ]
-    rownames(cand_df) <- NULL
+  # Deduplication across overlapping sliding windows
+  if (nrow(cand_df) > 1) {
+    d <- dim(y)
+    is_3d <- !is.null(d) && length(d) == 3 && d[1] > 1
+    if (is_3d) {
+      seq_len <- d[2]
+      stride <- if (merge_gap > 0) max(1L, seq_len - merge_gap) else max(1L, floor(seq_len / 4L))
+      win_k <- (cand_df$start - 1L) %/% seq_len
+      phys_start <- cand_df$start - win_k * (seq_len - stride)
+      phys_end   <- cand_df$end   - win_k * (seq_len - stride)
+      
+      ord <- order(phys_start)
+      cand_df <- cand_df[ord, ]
+      phys_start <- phys_start[ord]
+      phys_end   <- phys_end[ord]
+      
+      phys_gaps <- c(Inf, diff(phys_start))
+      # Redundant detections of the same physical event across windows have phys_start within 4 cadences
+      keep <- phys_gaps > 4L
+      cand_df <- cand_df[keep, ]
+      rownames(cand_df) <- NULL
+    } else if (merge_gap > 0) {
+      cand_df <- cand_df[order(cand_df$start), ]
+      gaps <- c(Inf, diff(cand_df$start))
+      eff_gap <- min(merge_gap, 4L)
+      cand_df <- cand_df[gaps > eff_gap, ]
+      rownames(cand_df) <- NULL
+    }
   }
   
   # Classify each candidate window into PHT multi-class categories
