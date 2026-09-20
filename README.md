@@ -59,6 +59,10 @@ There were several constraints during the execution of the project: in terms of 
 
 The detection pipeline has been expanded beyond the original autoencoder-only workflow. Recent updates include a lighter-weight triage scan to screen light curves efficiently, unified candidate scoring that combines several signals into one decision path, and more robust candidate generation across noisy or irregular data segments. The pipeline also adds support for batch precomputation, export tooling for crowd-consensus training data, and additional vetting checks to separate promising transit-like dips from spurious periodic noise. Together, these changes improve the speed, consistency, and scalability of the search process while preserving the project’s unsupervised approach.
 
+### Pipeline updates - 2026-09-20
+
+The project continues to tighten the unsupervised search loop by improving reproducibility, output organization, and candidate review across the full astronomy workflow. This update keeps the focus on cleaner preprocessing, more transparent model outputs, and easier reuse of generated detection artifacts so the repository remains practical for both experimentation and follow-up analysis. The result is a more consistent pipeline for exploring noisy Kepler light curves while keeping the long-term scientific goal centered on interpretable exoplanet detection.
+
 ## Areas to focus
 
 ### Immediate
