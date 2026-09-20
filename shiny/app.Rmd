@@ -1160,6 +1160,13 @@ server = function(input, output, session) {
           "SELECT start, label FROM user_star WHERE user_id = ? AND kepler_id = ? AND start > 0 ORDER BY start;",
           params = list(user_info()$name, current_star_id())),
         error = function(e) data.frame(start = integer(0), label = character(0)))
+      if (nrow(lbl_res) == 0L) {
+        lbl_res <- tryCatch(
+          dbGetQuery(db_conn,
+            "SELECT start, label FROM test_idx WHERE id = ? AND start > 0 ORDER BY start;",
+            params = list(current_star_id())),
+          error = function(e) data.frame(start = integer(0), label = character(0)))
+      }
       if (nrow(lbl_res) > 0L) {
         saved_lbls <- lbl_res$label
         saved_lbls[is.na(saved_lbls) | !nzchar(saved_lbls)] <- "Transit"
@@ -1556,6 +1563,13 @@ server = function(input, output, session) {
           "SELECT start, label FROM user_star WHERE user_id = ? AND kepler_id = ? AND start > 0 ORDER BY start;",
           params = list(isolate(user_info()$name), isolate(current_star_id()))),
         error = function(e) data.frame(start = integer(0), label = character(0)))
+      if (nrow(lbl_res) == 0L) {
+        lbl_res <- tryCatch(
+          dbGetQuery(db_conn,
+            "SELECT start, label FROM test_idx WHERE id = ? AND start > 0 ORDER BY start;",
+            params = list(isolate(current_star_id()))),
+          error = function(e) data.frame(start = integer(0), label = character(0)))
+      }
       if (nrow(lbl_res) > 0L) {
         lv <- lbl_res$label
         lv[is.na(lv) | !nzchar(lv)] <- "Transit"
