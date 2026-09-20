@@ -420,7 +420,8 @@ classify_candidate_window <- function(flux, pred, start, end, all_windows = NULL
       if (w_en > w_st) {
         w_dip <- max(pred[w_st:w_en] - flux[w_st:w_en], na.rm = TRUE)
         w_flr <- max(flux[w_st:w_en] - pred[w_st:w_en], na.rm = TRUE)
-        if (w_dip > w_flr) dip_wins[[length(dip_wins) + 1]] <- c(w_st, w_en)
+        # Must be an actual dip (not a flare) and above noise floor
+        if (w_dip > w_flr && w_dip >= 2.5 * err_scale) dip_wins[[length(dip_wins) + 1]] <- c(w_st, w_en)
       }
     }
     
@@ -435,29 +436,41 @@ classify_candidate_window <- function(flux, pred, start, end, all_windows = NULL
       cur_is_in <- any(vapply(dip_wins, function(w) abs(w[1] - st) <= 2 && abs(w[2] - en) <= 2, logical(1)))
       
       if (cur_is_in) {
+        is_eb <- FALSE
         if (length(depths) >= 4) {
-          odd_d  <- depths[seq(1, length(depths), by = 2)]
-          even_d <- depths[seq(2, length(depths), by = 2)]
-          m_odd <- mean(odd_d); m_even <- mean(even_d)
-          v_odd <- if (length(odd_d) > 1) stats::var(odd_d) else err_scale^2
-          v_even <- if (length(even_d) > 1) stats::var(even_d) else err_scale^2
-          se_diff <- sqrt(v_odd / length(odd_d) + v_even / length(even_d))
-          z_oe <- if (is.finite(se_diff) && se_diff > 0) abs(m_odd - m_even) / se_diff else 0
-          if (z_oe > 2.5 || abs(m_odd - m_even) > 2.0 * err_scale) {
-            return("Odd-Even")
+          # Check A: Alternating adjacent dips (short-period binaries, e.g. KIC 5024450)
+          adj_diff <- abs(diff(depths))
+          alt_diff <- abs(depths[3:length(depths)] - depths[1:(length(depths) - 2)])
+          med_adj <- stats::median(adj_diff)
+          med_alt <- stats::median(alt_diff)
+          if (med_adj >= 2.0 * med_alt && med_adj >= 2.5 * err_scale) {
+            is_eb <- TRUE
+          }
+          
+          # Check B: Odd/Even mean depth difference (moderate-to-long period binaries, e.g. KIC 1995732, KIC 10074700)
+          if (!is_eb) {
+            odd_d  <- depths[seq(1, length(depths), by = 2)]
+            even_d <- depths[seq(2, length(depths), by = 2)]
+            m_odd <- mean(odd_d); m_even <- mean(even_d)
+            rel_diff <- abs(m_odd - m_even) / max(1e-6, max(m_odd, m_even))
+            abs_diff <- abs(m_odd - m_even)
+            if (rel_diff >= 0.20 && abs_diff >= 2.5 * err_scale) {
+              is_eb <- TRUE
+            }
           }
         } else if (length(depths) == 2) {
           d_min <- min(depths[1], depths[2]); d_max <- max(depths[1], depths[2])
           d_diff <- d_max - d_min
-          if (d_min / max(1e-6, d_max) < 0.70 && d_diff > 2.0 * err_scale) {
-            return("Odd-Even")
+          if (d_min / max(1e-6, d_max) < 0.75 && d_diff >= 2.5 * err_scale) {
+            is_eb <- TRUE
           }
         } else if (length(depths) == 3) {
           d1 <- depths[1]; d2 <- depths[2]; d3 <- depths[3]
-          if (abs(d1 - d3) < abs(d1 - d2) * 0.5 && abs(d1 - d2) > 2.0 * err_scale) {
-            return("Odd-Even")
+          if (abs(d1 - d3) < abs(d1 - d2) * 0.5 && abs(d1 - d2) >= 2.5 * err_scale) {
+            is_eb <- TRUE
           }
         }
+        if (is_eb) return("Odd-Even")
       }
     }
   }
