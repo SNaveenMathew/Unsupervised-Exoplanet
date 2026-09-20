@@ -312,65 +312,274 @@ flatten_chronological <- function(arr) {
 #'   pipeline.R both do) to collapse these back into one candidate per
 #'   real event; leave at the default 0 for already-deduplicated or
 #'   non-windowed input.
-#' @return list with anomaly mask and candidate data frame (start, end)
-detect_transit_candidates <- function(y_pred, y, sigma_thresh = 2.5, min_duration = 2, max_duration = 24, merge_gap = 0) {
-  # Signed, symmetric residual: positive where actual is below predicted
-  # (a transit candidate), negative where actual is above it. Flattened
-  # chronologically (see flatten_chronological()) so a run of contiguous
-  # anomalous cadences within one window actually registers as contiguous,
-  # rather than being scattered n_windows apart by R's default as.vector().
-  diff_vec <- flatten_chronological(y_pred) - flatten_chronological(y)
+#' Classify a candidate light-curve window into Planet Hunters TESS categories
+#'
+#' Evaluates morphological, physical, and statistical features of the
+#' candidate segment [start:end] to classify it into:
+#'   - "Flare": Energetic positive flux eruption above baseline with rapid rise and decay.
+#'   - "Sinusoidal": Smooth, oscillatory wave with balanced excursions and high autocorrelation.
+#'   - "Odd-Even": Alternating depths across successive dips (eclipsing binary signature).
+#'   - "Transit": Predominantly negative dip with quiescent baseline, U/V shape, and consistent depth.
+#'   - "Uncertain": Ambiguous, noisy, single-point glitch, or borderline SNR anomaly.
+#'
+#' @param flux Chronologically flattened actual flux vector
+#' @param pred Chronologically flattened autoencoder predicted baseline
+#' @param start Integer cadence index of window start (1-based)
+#' @param end Integer cadence index of window end (1-based)
+#' @param all_windows Optional list or data frame of all candidate windows on this star
+#' @param err_scale Optional precomputed global residual noise scale (MAD); computed if NULL
+#' @return A character string: "Transit", "Sinusoidal", "Flare", "Odd-Even", or "Uncertain"
+classify_candidate_window <- function(flux, pred, start, end, all_windows = NULL, err_scale = NULL) {
+  n <- length(flux)
+  if (n < 2) return("Uncertain")
   
-  # Center and noise scale MUST come from the full symmetric residual
-  # above, not from the one-sided clipped res_error below. res_error is
-  # exactly zero for roughly half of all points by construction (wherever
-  # actual >= predicted), so computing median/MAD directly on it badly
-  # underestimates the true noise scale - the same zero-inflation failure
-  # mode already fixed in triage_scan() for exactly this reason.
+  st <- max(1L, as.integer(start))
+  en <- min(n, as.integer(end))
+  if (en < st) return("Uncertain")
+  dur <- en - st + 1L
+  
+  # Single isolated cadence with no width is typically an instrumental spike / cosmic ray
+  if (dur <= 1L) return("Uncertain")
+  
+  fl_win <- flux[st:en]
+  pr_win <- pred[st:en]
+  
+  # Global residual noise scale (MAD)
+  if (is.null(err_scale) || !is.finite(err_scale) || err_scale <= 0) {
+    diff_all <- pred - flux
+    err_scale <- stats::mad(diff_all, na.rm = TRUE)
+    if (!is.finite(err_scale) || err_scale <= 0) err_scale <- stats::sd(diff_all, na.rm = TRUE)
+    if (!is.finite(err_scale) || err_scale <= 0) err_scale <- 1e-4
+  }
+  
+  # Window residuals
+  dip_win   <- pr_win - fl_win   # positive when actual is below baseline (dip)
+  flare_win <- fl_win - pr_win   # positive when actual is above baseline (flare)
+  
+  pos_peak <- max(flare_win, na.rm = TRUE)  # peak excursion above baseline
+  neg_peak <- max(dip_win, na.rm = TRUE)    # peak excursion below baseline (dip depth)
+  
+  pos_area <- sum(pmax(0, flare_win), na.rm = TRUE)
+  neg_area <- sum(pmax(0, dip_win), na.rm = TRUE)
+  
+  # -------------------------------------------------------------------
+  # 1. FLARE: Energetic positive eruption above baseline
+  # -------------------------------------------------------------------
+  if (pos_peak > 2.0 * err_scale && (pos_area > 1.3 * neg_area || pos_peak > 1.5 * neg_peak)) {
+    peak_idx <- which.max(fl_win)[1]
+    rise_time <- peak_idx - 1L
+    decay_time <- dur - peak_idx
+    
+    # Asymmetric fast rise, or overwhelming positive excursion
+    if (rise_time <= decay_time + 1L || pos_peak > 3.0 * err_scale) {
+      return("Flare")
+    }
+  }
+  
+  # -------------------------------------------------------------------
+  # 2. SINUSOIDAL: Smooth, continuous oscillatory behavior
+  # -------------------------------------------------------------------
+  nb_st <- max(1L, st - max(16L, dur))
+  nb_en <- min(n, en + max(16L, dur))
+  nb_fl <- flux[nb_st:nb_en]
+  nb_pr <- pred[nb_st:nb_en]
+  nb_res <- nb_fl - nb_pr
+  
+  nb_pos <- max(nb_fl - nb_pr, na.rm = TRUE)
+  nb_neg <- max(nb_pr - nb_fl, na.rm = TRUE)
+  nb_bipolar_ratio <- min(max(0, nb_pos), max(0, nb_neg)) / max(1e-6, max(nb_pos, nb_neg))
+  win_bipolar_ratio <- min(max(0, pos_peak), max(0, neg_peak)) / max(1e-6, max(pos_peak, neg_peak))
+  
+  acf_lag1 <- 0
+  if (length(nb_res) >= 8) {
+    acf_lag1 <- tryCatch({
+      r <- stats::cor(nb_res[-length(nb_res)], nb_res[-1])
+      if (is.finite(r)) r else 0
+    }, error = function(e) 0)
+  }
+  
+  is_bipolar <- (win_bipolar_ratio > 0.35) || (nb_bipolar_ratio > 0.45 && nb_pos > 2.0 * err_scale && nb_neg > 2.0 * err_scale)
+  
+  if (is_bipolar && acf_lag1 > 0.40) {
+    return("Sinusoidal")
+  }
+  
+  # -------------------------------------------------------------------
+  # 3. ODD-EVEN: Eclipsing binary alternating depths
+  # -------------------------------------------------------------------
+  if (!is.null(all_windows)) {
+    win_list <- if (is.data.frame(all_windows)) {
+      lapply(seq_len(nrow(all_windows)), function(i) c(all_windows$start[i], all_windows$end[i]))
+    } else if (is.list(all_windows)) {
+      all_windows
+    } else list()
+    
+    dip_wins <- list()
+    for (w in win_list) {
+      w_st <- max(1L, w[1]); w_en <- min(n, w[2])
+      if (w_en > w_st) {
+        w_dip <- max(pred[w_st:w_en] - flux[w_st:w_en], na.rm = TRUE)
+        w_flr <- max(flux[w_st:w_en] - pred[w_st:w_en], na.rm = TRUE)
+        if (w_dip > w_flr) dip_wins[[length(dip_wins) + 1]] <- c(w_st, w_en)
+      }
+    }
+    
+    if (length(dip_wins) >= 2) {
+      dip_starts <- vapply(dip_wins, `[`, numeric(1), 1)
+      dip_wins <- dip_wins[order(dip_starts)]
+      
+      depths <- vapply(dip_wins, function(w) {
+        max(pred[w[1]:w[2]] - flux[w[1]:w[2]], na.rm = TRUE)
+      }, numeric(1))
+      
+      cur_is_in <- any(vapply(dip_wins, function(w) abs(w[1] - st) <= 2 && abs(w[2] - en) <= 2, logical(1)))
+      
+      if (cur_is_in) {
+        if (length(depths) >= 4) {
+          odd_d  <- depths[seq(1, length(depths), by = 2)]
+          even_d <- depths[seq(2, length(depths), by = 2)]
+          m_odd <- mean(odd_d); m_even <- mean(even_d)
+          v_odd <- if (length(odd_d) > 1) stats::var(odd_d) else err_scale^2
+          v_even <- if (length(even_d) > 1) stats::var(even_d) else err_scale^2
+          se_diff <- sqrt(v_odd / length(odd_d) + v_even / length(even_d))
+          z_oe <- if (is.finite(se_diff) && se_diff > 0) abs(m_odd - m_even) / se_diff else 0
+          if (z_oe > 2.5 || abs(m_odd - m_even) > 2.0 * err_scale) {
+            return("Odd-Even")
+          }
+        } else if (length(depths) == 2) {
+          d_min <- min(depths[1], depths[2]); d_max <- max(depths[1], depths[2])
+          d_diff <- d_max - d_min
+          if (d_min / max(1e-6, d_max) < 0.70 && d_diff > 2.0 * err_scale) {
+            return("Odd-Even")
+          }
+        } else if (length(depths) == 3) {
+          d1 <- depths[1]; d2 <- depths[2]; d3 <- depths[3]
+          if (abs(d1 - d3) < abs(d1 - d2) * 0.5 && abs(d1 - d2) > 2.0 * err_scale) {
+            return("Odd-Even")
+          }
+        }
+      }
+    }
+  }
+  
+  # -------------------------------------------------------------------
+  # 4. TRANSIT: Clean localized negative U/V-shaped dip
+  # -------------------------------------------------------------------
+  if (neg_peak >= 2.0 * err_scale && neg_area > 1.5 * pos_area && neg_peak > 1.3 * pos_peak) {
+    if (dur >= 2L && dur <= 36L) {
+      pre_st <- max(1L, st - min(12L, dur)); pre_en <- max(1L, st - 1L)
+      post_st <- min(n, en + 1L); post_en <- min(n, en + min(12L, dur))
+      pre_res <- if (pre_en >= pre_st) flux[pre_st:pre_en] - pred[pre_st:pre_en] else numeric(0)
+      post_res <- if (post_en >= post_st) flux[post_st:post_en] - pred[post_st:post_en] else numeric(0)
+      out_res <- c(pre_res, post_res)
+      out_mad <- if (length(out_res) >= 4) stats::mad(out_res, na.rm = TRUE) else err_scale
+      
+      if (out_mad <= 2.5 * err_scale) {
+        return("Transit")
+      }
+    }
+  }
+  
+  # -------------------------------------------------------------------
+  # 5. UNCERTAIN: Ambiguous, erratic noise, or borderline SNR
+  # -------------------------------------------------------------------
+  return("Uncertain")
+}
+
+#' Detect and multi-class tag exoplanet transit and stellar variability candidates
+#'
+#' Finds candidate anomaly intervals using robust (median/MAD) thresholding
+#' on the reconstruction residual between actual flux and autoencoder prediction.
+#' Detects both negative flux dips (transits, eclipses, sinusoidal troughs) and
+#' positive flux eruptions (stellar flares), then classifies each identified
+#' candidate interval into Planet Hunters TESS categories:
+#'   "Transit", "Sinusoidal", "Flare", "Odd-Even", or "Uncertain".
+#'
+#' @param y_pred Reconstructed/predicted flux array
+#' @param y Actual flux array
+#' @param sigma_thresh Standard deviation multiplier for anomaly detection (default: 2.5)
+#' @param min_duration Minimum candidate duration in cadences (default: 2 ~ 1 hour)
+#' @param max_duration Maximum candidate duration in cadences (default: 36 ~ 18 hours)
+#' @param merge_gap Collapses candidates whose starts are within this many
+#'   cadences of each other into a single representative candidate.
+#' @return list with anomaly mask, candidate data frame (start, end, label, depth), and threshold
+detect_transit_candidates <- function(y_pred, y, sigma_thresh = 2.5, min_duration = 2, max_duration = 36, merge_gap = 0) {
+  actual_vec <- flatten_chronological(y)
+  pred_vec   <- flatten_chronological(y_pred)
+  diff_vec   <- pred_vec - actual_vec  # positive where actual is below predicted (dip)
+  
   err_center <- stats::median(diff_vec, na.rm = TRUE)
-  err_scale <- stats::mad(diff_vec, na.rm = TRUE)
+  err_scale  <- stats::mad(diff_vec, na.rm = TRUE)
+  if (!is.finite(err_scale) || err_scale <= 0) {
+    err_scale <- stats::sd(diff_vec, na.rm = TRUE)
+  }
   
-  # Asymmetric error: Exoplanet transits are negative dips (actual < predicted baseline)
-  # error = max(0, predicted - actual), centered on the residual's own median
-  res_error <- pmax(0, diff_vec - err_center)
-  
-  if(is.na(err_scale) || err_scale == 0) {
+  if (is.na(err_scale) || err_scale == 0) {
     thr <- Inf
   } else {
     thr <- sigma_thresh * err_scale
   }
   
-  is_anom <- (res_error > thr) & is.finite(res_error)
+  # Detect negative dips (transits, eclipses, sinusoidal troughs)
+  dip_error <- pmax(0, diff_vec - err_center)
+  is_dip_anom <- (dip_error > thr) & is.finite(dip_error)
   
-  # Group contiguous anomalies into candidate transit intervals
+  # Detect positive spikes/flares (actual > predicted baseline)
+  flare_error <- pmax(0, -(diff_vec - err_center))
+  is_flare_anom <- (flare_error > thr) & is.finite(flare_error)
+  
+  is_anom <- is_dip_anom | is_flare_anom
+  
+  # Group contiguous anomalies into candidate intervals
   starts <- integer(0)
-  ends <- integer(0)
+  ends   <- integer(0)
   
-  if(any(is_anom)) {
+  if (any(is_anom)) {
     rle_res <- rle(is_anom)
     end_indices <- cumsum(rle_res$lengths)
     start_indices <- c(1, end_indices[-length(end_indices)] + 1)
     
     true_runs <- which(rle_res$values == TRUE)
-    for(r in true_runs) {
+    for (r in true_runs) {
       dur <- rle_res$lengths[r]
-      if(dur >= min_duration && dur <= max_duration) {
+      if (dur >= min_duration && dur <= max_duration) {
         starts <- c(starts, start_indices[r])
-        ends <- c(ends, end_indices[r])
+        ends   <- c(ends, end_indices[r])
       }
     }
   }
   
   cand_df <- data.frame(start = starts, end = ends)
   
-  # Collapse redundant re-detections of the same physical event across
-  # overlapping windows - see the merge_gap parameter doc above.
+  # Collapse redundant re-detections of the same physical event across overlapping windows
   if (merge_gap > 0 && nrow(cand_df) > 1) {
     cand_df <- cand_df[order(cand_df$start), ]
-    gaps <- c(Inf, diff(cand_df$start))  # Inf forces the first row to start a new group
+    gaps <- c(Inf, diff(cand_df$start))
     group_id <- cumsum(gaps > merge_gap)
     cand_df <- cand_df[!duplicated(group_id), ]
     rownames(cand_df) <- NULL
+  }
+  
+  # Classify each candidate window into PHT multi-class categories
+  if (nrow(cand_df) > 0) {
+    labels <- vapply(seq_len(nrow(cand_df)), function(i) {
+      classify_candidate_window(
+        flux = actual_vec, pred = pred_vec,
+        start = cand_df$start[i], end = cand_df$end[i],
+        all_windows = cand_df, err_scale = err_scale
+      )
+    }, character(1))
+    
+    depths <- vapply(seq_len(nrow(cand_df)), function(i) {
+      st <- cand_df$start[i]; en <- cand_df$end[i]
+      max(abs(pred_vec[st:en] - actual_vec[st:en]), na.rm = TRUE)
+    }, numeric(1))
+    
+    cand_df$label <- labels
+    cand_df$depth <- depths
+  } else {
+    cand_df$label <- character(0)
+    cand_df$depth <- numeric(0)
   }
   
   return(list(is_anomaly = is_anom, candidates = cand_df, threshold = thr))
@@ -452,14 +661,15 @@ triage_scan <- function(flux, sigma_thresh = 3.0, min_duration = 2, max_duration
   # distribution gets clipped away, collapsing its MAD toward 0 and making
   # the resulting threshold far too loose).
   robust_sd <- stats::mad(fl[ok] - baseline, na.rm = TRUE)
-  dip <- rep(0, length(fl))
-  dip[ok] <- pmax(0, baseline - fl[ok])  # positive during a negative flux dip
-  
   if (!is.finite(robust_sd) || robust_sd <= 0) {
     return(list(worth_full_scan = TRUE, n_candidate_points = NA_integer_, candidate_windows = list()))
   }
   
-  is_cand <- ok & (dip > sigma_thresh * robust_sd)
+  # Detect both negative dips and positive flares/variability
+  dev <- rep(0, length(fl))
+  dev[ok] <- abs(fl[ok] - baseline)
+  
+  is_cand <- ok & (dev > sigma_thresh * robust_sd)
   
   starts <- integer(0); ends <- integer(0)
   if (any(is_cand)) {
@@ -1072,7 +1282,7 @@ score_star <- function(tbl_file, trained_model_paths, db_conn = NULL, plot_file 
 #' @return list(candidates, from_cache)
 record_candidates <- function(y_pred, y, star_id, db_conn = NULL, table_name = "test_idx",
                                plot_file = NULL, force = FALSE, merge_gap = 0,
-                               label = "model_detection") {
+                               label = NULL) {
   det_res <- detect_transit_candidates(y_pred = y_pred, y = y, merge_gap = merge_gap)
   candidates <- det_res$candidates
   
@@ -1097,14 +1307,19 @@ record_candidates <- function(y_pred, y, star_id, db_conn = NULL, table_name = "
       ts <- format(Sys.time(), "%Y-%m-%dT%H:%M:%S")
       cand_out <- if (nrow(candidates) > 0) {
         out <- candidates
-        out$id    <- star_id
-        out$label <- label
+        out$id <- star_id
+        if (!is.null(label)) {
+          out$label <- label
+        } else if (!("label" %in% names(out))) {
+          out$label <- "Transit"
+        }
         out$classified_at <- ts
         out[, c("id", "start", "end", "label", "classified_at")]
       } else {
         # placeholder: "scored, nothing found" — same (0,0) convention as user_star
+        lbl <- if (!is.null(label)) label else "no_transit"
         data.frame(id = star_id, start = 0L, end = 0L,
-                   label = label, classified_at = ts, stringsAsFactors = FALSE)
+                   label = lbl, classified_at = ts, stringsAsFactors = FALSE)
       }
       # Ensure new columns exist in the target table. ALTER TABLE ADD COLUMN errors
       # if the column already exists; we swallow that so re-runs are idempotent.
