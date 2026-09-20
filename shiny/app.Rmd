@@ -74,41 +74,74 @@ indices_to_windows <- function(idx) {
 #                     drag-selecting empty plot area (dragmode = "select"),
 #                     which is a distinct gesture from editing an existing
 #                     shape, so both work on the same plot at once.
+# Label -> fill / border colour for transit-window shapes.
+# Tag mode shapes are editable; view-mode shapes are shaded but static.
+lc_label_colors <- list(
+  "Transit"    = list(fill = "rgba(255,165,0,0.25)",   border = "rgba(217,119,6,0.90)"),
+  "Sinusoidal" = list(fill = "rgba(139,92,246,0.25)",  border = "rgba(109,40,217,0.90)"),
+  "Flare"      = list(fill = "rgba(239,68,68,0.25)",   border = "rgba(185,28,28,0.90)"),
+  "Odd-Even"   = list(fill = "rgba(20,184,166,0.25)",  border = "rgba(13,148,136,0.90)"),
+  "Uncertain"  = list(fill = "rgba(156,163,175,0.25)", border = "rgba(107,114,128,0.90)")
+)
+lc_get_col <- function(lbl) {
+  if (is.null(lbl) || !nzchar(as.character(lbl)) || !lbl %in% names(lc_label_colors))
+    lc_label_colors[["Transit"]]
+  else
+    lc_label_colors[[lbl]]
+}
+
+# Builds the interactive light-curve plot.
+#   mode = "view" -> read-only; saved windows shown as non-editable shaded regions;
+#                    candidate points coloured red via idx_mask.
+#   mode = "tag"  -> tagging session: windows are editable, colour-coded by label.
+# The x-axis is always in elapsed days (cadence index converted via cadence_days);
+# xlim is still supplied in cadence-index units and converted internally so
+# that all zoom state remains in the same units as the DB.
 build_light_curve_plotly <- function(test_vec, pred_vec, xlim, ylim, idx_mask,
                                       title_str, mode = c("view", "tag"),
-                                      tag_windows_list = NULL, source_id = "trainPlot_src") {
+                                      tag_windows_list = NULL, tag_labels_list = NULL,
+                                      source_id = "trainPlot_src",
+                                      cadence_days = 29.4 / 1440) {
   mode <- match.arg(mode)
   n <- length(test_vec)
-  x_idx <- seq_len(n)
+  x_days <- (seq_len(n) - 1L) * cadence_days   # elapsed days for the x-axis
   marker_color <- if (mode == "tag") rep("black", n) else ifelse(idx_mask, "red", "black")
 
   p <- plot_ly(source = source_id) %>%
-    add_markers(x = x_idx, y = test_vec,
+    add_markers(x = x_days, y = test_vec,
                 marker = list(color = marker_color, size = 4),
                 name = "Light Curve", hoverinfo = "x+y")
 
   if (length(pred_vec) == n) {
-    p <- p %>% add_lines(x = x_idx, y = pred_vec,
+    p <- p %>% add_lines(x = x_days, y = pred_vec,
                           line = list(color = "dodgerblue", width = 1.5),
                           name = "Autoencoder Baseline")
   }
 
+  # Draw window shapes (editable in tag mode, static in view mode)
   shapes_list <- list()
-  if (mode == "tag" && length(tag_windows_list) > 0) {
-    for (w in tag_windows_list) {
+  if (length(tag_windows_list) > 0) {
+    for (i in seq_along(tag_windows_list)) {
+      w   <- tag_windows_list[[i]]
+      lbl <- if (!is.null(tag_labels_list) && i <= length(tag_labels_list)) tag_labels_list[[i]] else "Transit"
+      col <- lc_get_col(lbl)
       shapes_list[[length(shapes_list) + 1]] <- list(
         type = "rect", xref = "x", yref = "paper",
-        x0 = w[1], x1 = w[2], y0 = 0, y1 = 1,
-        fillcolor = "rgba(255,165,0,0.28)",
-        line = list(color = "rgba(217,119,6,0.95)", width = 2),
-        editable = TRUE
+        x0 = (w[1] - 1L) * cadence_days, x1 = (w[2] - 1L) * cadence_days,
+        y0 = 0, y1 = 1,
+        fillcolor = col$fill,
+        line = list(color = col$border, width = 2),
+        editable = (mode == "tag")
       )
     }
   }
 
+  # Convert xlim (cadence indices) to day-units for the plot axis range
+  xlim_days <- if (!is.null(xlim)) (xlim - 1L) * cadence_days else NULL
+
   p <- p %>%
     layout(title = title_str,
-           xaxis = list(title = "Cadence Index", range = xlim),
+           xaxis = list(title = "Time (days)", range = xlim_days),
            yaxis = list(title = "Normalized Flux", range = ylim),
            dragmode = "select",
            shapes = shapes_list,
@@ -577,6 +610,7 @@ windows_iou <- function(windows_a, windows_b) {
 # the same (0,0)-placeholder-drops-to-empty-set convention as
 # indices_to_windows() elsewhere in this file.
 get_star_human_tag_sets <- function(db_conn, kepler_id) {
+  if (!dbExistsTable(db_conn, "user_star")) return(list())
   rows <- dbGetQuery(db_conn, "SELECT user_id, start, end FROM user_star WHERE kepler_id = ?;",
                       params = list(kepler_id))
   if (nrow(rows) == 0) return(list())
@@ -787,11 +821,32 @@ cadence_days <- 29.4 / 1440  # Kepler long-cadence spacing, in days (29.4 min)
 
 
 mydb <- dbConnect(RSQLite::SQLite(), sql_db_file)
-if(!dbExistsTable(conn = mydb, name = "user_star")) {
-  dbGetQuery(mydb, "CREATE TABLE user_star (user_id varchar(64), kepler_id int, start int, end int);")
+if (!dbExistsTable(conn = mydb, name = "user_star")) {
+  dbExecute(mydb, paste0(
+    "CREATE TABLE user_star (",
+    "user_id varchar(64), kepler_id int, start int, end int,",
+    "label TEXT, flagged INTEGER DEFAULT 0, classified_at TEXT);"))
 }
-if(!dbExistsTable(conn = mydb, name = "user_base")) {
-  dbGetQuery(mydb, "CREATE TABLE user_base (user varchar(64), password_hash varchar(101), permissions varchar(9), name varchar(64), PRIMARY KEY(user));")
+if (!dbExistsTable(conn = mydb, name = "user_base")) {
+  dbExecute(mydb, paste0(
+    "CREATE TABLE user_base (user varchar(64), password_hash varchar(101),",
+    "permissions varchar(9), name varchar(64), PRIMARY KEY(user));"))
+}
+# Additive migration: add new columns to user_star if they don't exist yet.
+# SQLite errors when adding an already-existing column; swallow so re-runs are safe.
+for (.col_def in c("label TEXT", "flagged INTEGER DEFAULT 0", "classified_at TEXT")) {
+  tryCatch(dbExecute(mydb, paste0("ALTER TABLE user_star ADD COLUMN ", .col_def, ";")),
+           error = function(e) NULL)
+}
+# Same migration for model-output tables (record_candidates() handles new writes;
+# this covers tables that already exist from a previous run before the upgrade).
+for (.tbl in c("test_idx", "train_idx")) {
+  if (dbExistsTable(mydb, .tbl)) {
+    for (.col_def in c("label TEXT", "classified_at TEXT")) {
+      tryCatch(dbExecute(mydb, paste0("ALTER TABLE \"", .tbl, "\" ADD COLUMN ", .col_def, ";")),
+               error = function(e) NULL)
+    }
+  }
 }
 
 
@@ -840,6 +895,7 @@ shinyApp(ui = dashboardPage(
     div(textOutput("welcome"), style = "padding: 20px"),
     div(uiOutput("kplr_id")),
     div(style = "padding: 0 15px 8px 15px;", uiOutput("star_priority_badge")),
+    div(style = "padding: 0 15px 4px 15px;",  uiOutput("session_counter")),
     div(style = "padding: 0 15px 15px 15px;",
         bsButton("bandit_suggest", label = " Suggest Next Star", icon = icon("dice"), style = "primary", block = TRUE),
         bsTooltip(id = "bandit_suggest",
@@ -998,59 +1054,74 @@ server = function(input, output, session) {
   refresh_saved_indices <- function() {
     req(input$kplr_id)
     saved_indices(get_candidate_indices(current_star_id(), user_info()$name))
+    # Sync the flag state for the current user/star from the DB
+    flag_q <- tryCatch(
+      dbGetQuery(db_conn,
+        "SELECT flagged FROM user_star WHERE user_id = ? AND kepler_id = ? AND flagged = 1 LIMIT 1;",
+        params = list(user_info()$name, current_star_id())),
+      error = function(e) data.frame(flagged = integer(0)))
+    star_flagged(nrow(flag_q) > 0L)
   }
   
   # --- Manual tagging session state -----------------------------------
-  # Separate from regular brush-to-zoom: while tag_mode is TRUE, drag-select
-  # defines NEW candidate windows (fixed one at a time via "Fix Brush as
-  # Window") instead of zooming, and previously fixed windows are drawn as
-  # draggable/resizable shapes on the plot.
-  tag_mode <- reactiveVal(FALSE)
-  tag_windows <- reactiveVal(list())      # list of c(start, end) pairs
+  # tag_windows: list of c(start, end) cadence-index pairs for the current session.
+  # tag_labels:  parallel list of label strings ("Transit", "Sinusoidal", etc.).
+  # last_window_label: persists the label picker choice across toolbar re-renders.
+  tag_mode         <- reactiveVal(FALSE)
+  tag_windows      <- reactiveVal(list())
+  tag_labels       <- reactiveVal(list())
+  last_window_label <- reactiveVal("Transit")
   tag_redraw_trigger <- reactiveVal(0)    # bumped only on STRUCTURAL changes
-  # (new/removed window, session start/end) so that live edge-dragging - which
-  # already updates instantly client-side in plotly - doesn't force a full
-  # plot rebuild while the user is mid-drag.
-  bump_tag_redraw <- function() tag_redraw_trigger(isolate(tag_redraw_trigger()) + 1)
+  bump_tag_redraw  <- function() tag_redraw_trigger(isolate(tag_redraw_trigger()) + 1)
 
-  # Result of the most recent BLS (Box Least Squares) period search for the
-  # currently selected star; NULL until "Verify Period (BLS)" is run, and
-  # cleared whenever a different star is selected.
+  # Per-session classification counter shown in the sidebar.
+  session_counts <- reactiveValues(n_transit = 0L, n_no_transit = 0L)
+
+  # Per-star flag state for the current user (synced from DB by refresh_saved_indices).
+  star_flagged <- reactiveVal(FALSE)
+
+  # Per-star cache of score_star() results keyed by kplr_id dropdown value.
+  # Avoids re-running the (potentially expensive) model inference on every
+  # zoom / window-drag; cleared implicitly when the session ends.
+  star_data_cache <- reactiveVal(list())
+
+  # Result of the most recent BLS period search; NULL until "Verify Period" is run.
   bls_result <- reactiveVal(NULL)
   
-  # Odd-even transit and secondary-eclipse vetting check results for the
-  # most recent BLS search (see run_vetting_checks()). NULL until a search
-  # has been run, or if there wasn't enough data to compute them.
+  # Odd-even / secondary-eclipse vetting results for the last BLS search.
   vetting_result <- reactiveVal(NULL)
   
-  # Bumped whenever a tagging change is saved (confirm/reset) so the
-  # star-priority badge recomputes; the bandit "Suggest" button always
-  # recomputes live on click regardless of this trigger.
+  # Bumped whenever a tagging change is saved so the star-priority badge recomputes.
   tag_save_trigger <- reactiveVal(0)
   
-  # NULL whenever the most recent trainPlot render used a real model
-  # prediction; otherwise one of "no_model" / "no_backend" / "load_error",
-  # set live inside output$trainPlot so output$model_fallback_banner can
-  # warn that the plot is showing a flat zero baseline, not a real result.
+  # NULL when the plot used a real model prediction; otherwise a fallback reason code.
   model_fallback_state <- reactiveVal(NULL)
   
-  # Result of the fast, model-free triage_scan() (see util.R) for whichever
-  # star output$trainPlot most recently rendered. NULL until a star has been
-  # scored at least once.
+  # Fast triage result for the most-recently rendered star.
   triage_state <- reactiveVal(NULL)
   
-  # Whether the "Community Tags" panel is currently expanded. Toggled by
-  # the toolbar button; independent of tag_mode so it can be checked
-  # either while browsing or while actively tagging.
+  # Whether the "Community Tags" panel is expanded.
   community_tags_visible <- reactiveVal(FALSE)
+
+  # Keep last_window_label in sync with the live selectInput in tag mode
+  observe({
+    req(input$window_label)
+    last_window_label(input$window_label)
+  })
   
   output$tag_window_summary <- renderText({
-    w <- tag_windows()
+    w    <- tag_windows()
+    lbls <- tag_labels()
     if (length(w) == 0) {
       "No windows fixed yet. Drag-select a range on the plot, then click 'Fix Brush as Window'."
     } else {
-      paste0(length(w), " window(s) fixed: ",
-             paste(sapply(w, function(x) paste0("[", x[1], "-", x[2], "]")), collapse = ", "))
+      parts <- mapply(function(win, lbl) {
+        d0 <- round((win[1] - 1L) * cadence_days, 2)
+        d1 <- round((win[2] - 1L) * cadence_days, 2)
+        paste0("[", d0, "\u2013", d1, " d | ", lbl, "]")
+      }, w, if (length(lbls) == length(w)) lbls else rep("Transit", length(w)),
+      SIMPLIFY = TRUE)
+      paste0(length(w), " window(s): ", paste(parts, collapse = ", "))
     }
   })
   
@@ -1059,38 +1130,60 @@ server = function(input, output, session) {
     zoom_state$xlim <- NULL
     tag_mode(FALSE)
     tag_windows(list())
+    tag_labels(list())
     bls_result(NULL)
+    vetting_result(NULL)
+    star_flagged(FALSE)  # overwritten synchronously by refresh_saved_indices() below
     refresh_saved_indices()
   })
   
-  # Zoom into current drag-selection (view mode only)
+  # Zoom into current drag-selection (view mode only).
+  # sel$x is in day-units (x-axis); convert back to cadence indices for zoom_state.
   observeEvent(input$zoom_brush, {
     req(!isTRUE(tag_mode()))
     sel <- event_data("plotly_selected", source = "trainPlot_src")
     if (!is.null(sel) && nrow(sel) > 0) {
-      st <- floor(max(1, min(sel$x)))
-      en <- ceiling(max(sel$x))
-      if (en > st + 3) zoom_state$xlim <- c(st, en)
+      st <- max(1L, as.integer(floor(min(sel$x) / cadence_days)) + 1L)
+      en <- as.integer(ceiling(max(sel$x) / cadence_days)) + 1L
+      if (en > st + 3L) zoom_state$xlim <- c(st, en)
     }
   })
   
-  # Enter tagging mode, pre-loaded with the star's currently saved tags
+  # Enter tagging mode, pre-loaded with the star's currently saved tags + labels
   observeEvent(input$start_tagging, {
-    tag_windows(indices_to_windows(saved_indices()))
+    wins <- indices_to_windows(saved_indices())
+    tag_windows(wins)
+    # Load saved labels; NULL/NA fall back to "Transit" for backward compat
+    if (length(wins) > 0L) {
+      lbl_res <- tryCatch(
+        dbGetQuery(db_conn,
+          "SELECT start, label FROM user_star WHERE user_id = ? AND kepler_id = ? AND start > 0 ORDER BY start;",
+          params = list(user_info()$name, current_star_id())),
+        error = function(e) data.frame(start = integer(0), label = character(0)))
+      if (nrow(lbl_res) > 0L) {
+        saved_lbls <- lbl_res$label
+        saved_lbls[is.na(saved_lbls) | !nzchar(saved_lbls)] <- "Transit"
+        tag_labels(as.list(saved_lbls))
+      } else {
+        tag_labels(rep(list("Transit"), length(wins)))
+      }
+    } else {
+      tag_labels(list())
+    }
     tag_mode(TRUE)
     bump_tag_redraw()
   })
   
-  # Enter tagging mode with a blank slate (replaces the old "Customize"
-  # behavior of writing a (0,0) placeholder row directly to the database -
-  # now nothing is written until the user explicitly confirms)
+  # Enter tagging mode with a blank slate (nothing written until user confirms)
   observeEvent(input$customize, {
     tag_windows(list())
+    tag_labels(list())
     tag_mode(TRUE)
     bump_tag_redraw()
   })
   
-  # Fix the current drag-selection as a new tag window
+  # Fix the current drag-selection as a new tag window.
+  # sel$x is in day-units; convert to cadence indices before storing.
   observeEvent(input$fix_brush, {
     req(isTRUE(tag_mode()))
     sel <- event_data("plotly_selected", source = "trainPlot_src")
@@ -1098,34 +1191,43 @@ server = function(input, output, session) {
       showNotification("Drag-select a range on the plot first, then click 'Fix Brush as Window'.", type = "warning")
       return(invisible(NULL))
     }
-    st <- floor(max(1, min(sel$x)))
-    en <- ceiling(max(sel$x))
-    if (en <= st + 1) {
+    st <- max(1L, as.integer(floor(min(sel$x) / cadence_days)) + 1L)
+    en <- as.integer(ceiling(max(sel$x) / cadence_days)) + 1L
+    if (en <= st + 1L) {
       showNotification("Selected range is too small.", type = "warning")
       return(invisible(NULL))
     }
     windows <- tag_windows()
     windows[[length(windows) + 1]] <- c(st, en)
     tag_windows(windows)
+    lbl <- isolate(last_window_label())
+    if (!nzchar(lbl)) lbl <- "Transit"
+    labels <- tag_labels()
+    labels[[length(labels) + 1]] <- lbl
+    tag_labels(labels)
     bump_tag_redraw()
   })
   
-  # Remove the most recently fixed window
+  # Remove the most recently fixed window (and its label)
   observeEvent(input$undo_window, {
     req(isTRUE(tag_mode()))
     windows <- tag_windows()
-    if (length(windows) > 0) {
+    if (length(windows) > 0L) {
       windows[[length(windows)]] <- NULL
       tag_windows(windows)
+      labels <- tag_labels()
+      if (length(labels) > 0L) {
+        labels[[length(labels)]] <- NULL
+        tag_labels(labels)
+      }
       bump_tag_redraw()
     }
   })
   
   # Sync edge-drag / move edits on fixed window shapes back into tag_windows.
-  # Deliberately does NOT call bump_tag_redraw(): plotly has already updated
-  # the shape client-side as part of the drag, so we only need to keep the
-  # server-side value in sync for when the session is confirmed or redrawn
-  # for another reason (e.g. a subsequent zoom).
+  # shapes[i].x0/.x1 are in day-units (matching the plot x-axis); convert
+  # back to cadence indices before storing. Does NOT bump tag_redraw: plotly
+  # has already updated the shape client-side, so no full rebuild is needed.
   observeEvent(event_data("plotly_relayout", source = "trainPlot_src"), {
     req(isTRUE(tag_mode()))
     ed <- event_data("plotly_relayout", source = "trainPlot_src")
@@ -1137,43 +1239,125 @@ server = function(input, output, session) {
       m <- regmatches(k, regexec("^shapes\\[([0-9]+)\\]\\.(x0|x1)$", k))[[1]]
       i <- as.integer(m[2]) + 1L  # shapes[] is 0-indexed in plotly.js
       coord <- m[3]
-      val <- suppressWarnings(as.numeric(ed[[k]]))
-      if (i >= 1 && i <= length(windows) && !is.na(val)) {
-        if (coord == "x0") windows[[i]][1] <- floor(val) else windows[[i]][2] <- ceiling(val)
+      val_day <- suppressWarnings(as.numeric(ed[[k]]))
+      if (i >= 1L && i <= length(windows) && !is.na(val_day)) {
+        # day -> cadence index: idx = floor(day/cd)+1 for left edge, ceiling+1 for right
+        val_idx <- if (coord == "x0") {
+          max(1L, as.integer(floor(val_day / cadence_days)) + 1L)
+        } else {
+          as.integer(ceiling(val_day / cadence_days)) + 1L
+        }
+        if (coord == "x0") windows[[i]][1] <- val_idx else windows[[i]][2] <- val_idx
       }
     }
     windows <- lapply(windows, function(w) c(min(w), max(w)))
     tag_windows(windows)
   }, ignoreNULL = TRUE, ignoreInit = TRUE)
   
-  # Save all fixed windows to the sqlite database as the user's tagged data
+  # Save all fixed windows (with labels) to the database as the user's tagged data.
   observeEvent(input$confirm_tags, {
     req(isTRUE(tag_mode()))
     username <- user_info()$name
-    id <- current_star_id()
-    windows <- tag_windows()
+    id       <- current_star_id()
+    windows  <- tag_windows()
+    labels   <- isolate(tag_labels())
+    ts       <- format(Sys.time(), "%Y-%m-%dT%H:%M:%S")
     dbExecute(db_conn, "DELETE FROM user_star WHERE user_id = ? AND kepler_id = ?;",
               params = list(username, id))
-    if (length(windows) == 0) {
-      dbExecute(db_conn, "INSERT INTO user_star VALUES (?, ?, 0, 0);",
-                params = list(username, id))
+    if (length(windows) == 0L) {
+      dbExecute(db_conn,
+        "INSERT INTO user_star (user_id, kepler_id, start, end, label, flagged, classified_at) VALUES (?, ?, 0, 0, 'no_transit', 0, ?);",
+        params = list(username, id, ts))
+      session_counts$n_no_transit <- isolate(session_counts$n_no_transit) + 1L
     } else {
-      for (w in windows) {
-        dbExecute(db_conn, "INSERT INTO user_star VALUES (?, ?, ?, ?);",
-                  params = list(username, id, floor(w[1]), ceiling(w[2])))
+      for (j in seq_along(windows)) {
+        w   <- windows[[j]]
+        lbl <- if (j <= length(labels) && nzchar(as.character(labels[[j]]))) labels[[j]] else "Transit"
+        dbExecute(db_conn,
+          "INSERT INTO user_star (user_id, kepler_id, start, end, label, flagged, classified_at) VALUES (?, ?, ?, ?, ?, 0, ?);",
+          params = list(username, id, floor(w[1]), ceiling(w[2]), lbl, ts))
       }
+      session_counts$n_transit <- isolate(session_counts$n_transit) + 1L
     }
     tag_mode(FALSE)
     tag_windows(list())
+    tag_labels(list())
     refresh_saved_indices()
     tag_save_trigger(isolate(tag_save_trigger()) + 1)
-    showNotification(paste0("Saved ", length(windows), " tagged window(s)."), type = "message")
+    n_wins <- length(windows)
+    msg <- if (n_wins == 0L) "No Transit saved." else paste0("Saved ", n_wins, " window(s).")
+    showNotification(msg, type = "message", duration = 4)
+    # Surface the next recommended star
+    ranked <- rank_stars_by_bandit(db_conn, options)
+    showNotification(sprintf("\u2192 Next suggested: %s", ranked[1L, "star"]),
+                     type = "message", duration = 6)
   })
   
   # Discard the tagging session without touching the database
   observeEvent(input$cancel_tagging, {
     tag_mode(FALSE)
     tag_windows(list())
+    tag_labels(list())
+  })
+
+  # --- PHT-style one-click actions -------------------------------------------
+
+  # "No Transit (Done)": marks this star as explicitly checked with nothing seen,
+  # saves a no_transit row immediately (without entering tagging mode), and
+  # auto-advances to the next bandit-recommended star.
+  observeEvent(input$no_transit, {
+    req(credentials()$user_auth, !isTRUE(tag_mode()))
+    username <- user_info()$name
+    id <- current_star_id()
+    ts <- format(Sys.time(), "%Y-%m-%dT%H:%M:%S")
+    dbExecute(db_conn, "DELETE FROM user_star WHERE user_id = ? AND kepler_id = ?;",
+              params = list(username, id))
+    dbExecute(db_conn,
+      "INSERT INTO user_star (user_id, kepler_id, start, end, label, flagged, classified_at) VALUES (?, ?, 0, 0, 'no_transit', 0, ?);",
+      params = list(username, id, ts))
+    refresh_saved_indices()
+    session_counts$n_no_transit <- isolate(session_counts$n_no_transit) + 1L
+    tag_save_trigger(isolate(tag_save_trigger()) + 1)
+    showNotification("No Transit recorded.", type = "message", duration = 3)
+    ranked <- rank_stars_by_bandit(db_conn, options)
+    updateSelectInput(session, "kplr_id", selected = ranked[1L, "star"])
+  })
+
+  # "Next Star": jump to bandit-suggested next star without saving anything.
+  observeEvent(input$next_star, {
+    req(credentials()$user_auth)
+    ranked <- rank_stars_by_bandit(db_conn, options)
+    updateSelectInput(session, "kplr_id", selected = ranked[1L, "star"])
+  })
+
+  # "Flag for Discussion": toggles the flagged column in user_star for this
+  # user/star pair. Upserts: inserts a placeholder row if none exists yet.
+  observeEvent(input$flag_discussion, {
+    req(credentials()$user_auth)
+    new_val  <- !isTRUE(star_flagged())
+    username <- user_info()$name
+    id       <- current_star_id()
+    ts       <- format(Sys.time(), "%Y-%m-%dT%H:%M:%S")
+    existing_n <- tryCatch(
+      dbGetQuery(db_conn,
+        "SELECT count(*) AS n FROM user_star WHERE user_id = ? AND kepler_id = ?;",
+        params = list(username, id))$n,
+      error = function(e) 0L)
+    if (!is.finite(existing_n)) existing_n <- 0L
+    if (existing_n > 0L) {
+      dbExecute(db_conn,
+        "UPDATE user_star SET flagged = ? WHERE user_id = ? AND kepler_id = ?;",
+        params = list(as.integer(new_val), username, id))
+    } else {
+      dbExecute(db_conn,
+        "INSERT INTO user_star (user_id, kepler_id, start, end, label, flagged, classified_at) VALUES (?, ?, 0, 0, NULL, ?, ?);",
+        params = list(username, id, as.integer(new_val), ts))
+    }
+    star_flagged(new_val)
+    tag_save_trigger(isolate(tag_save_trigger()) + 1)
+    showNotification(
+      if (new_val) "\u2691 Flagged for discussion." else "Flag removed.",
+      type = if (new_val) "warning" else "message", duration = 3)
   })
   
   # Zoom in (+50%)
@@ -1277,15 +1461,27 @@ server = function(input, output, session) {
               params = list(user_info()$name, current_star_id()))
     tag_mode(FALSE)
     tag_windows(list())
+    tag_labels(list())
     refresh_saved_indices()
     tag_save_trigger(isolate(tag_save_trigger()) + 1)
   })
+
+  output$session_counter <- renderUI({
+    req(credentials()$user_auth)
+    tag_save_trigger()
+    n_t  <- session_counts$n_transit
+    n_nt <- session_counts$n_no_transit
+    total <- n_t + n_nt
+    if (total == 0L) return(NULL)
+    div(style = "font-size: 0.8em; color: #aaa; line-height: 1.5;",
+        sprintf("Session: %d classified", total), br(),
+        sprintf("%d transit \u2022 %d no-transit", n_t, n_nt))
+  })
   
-  # Single reactive plot: reads input$kplr_id, zoom_state$xlim and tag_mode()
-  # reactively (any of these force a full rebuild), but reads tag_windows()
-  # via isolate() together with the lightweight tag_redraw_trigger() - so a
-  # window shape being live-dragged does not itself force a rebuild, only
-  # explicit structural changes (fix/undo/start/confirm/cancel) do.
+  # Single reactive plot. Reads kplr_id, zoom, tag_mode reactively;
+  # reads tag_windows via isolate() + tag_redraw_trigger so live edge-drags
+  # don't force a full rebuild. Uses star_data_cache to avoid re-running
+  # score_star() on every zoom or window change.
   output$trainPlot <- renderPlotly({
     req(credentials()$user_auth, input$kplr_id)
     kplr_id_val <- input$kplr_id
@@ -1294,77 +1490,88 @@ server = function(input, output, session) {
     xlim_dep <- zoom_state$xlim
     
     file <- list.files(data_dir, pattern = kplr_id_val, full.names = TRUE)[1]
-    if(is.na(file) || !file.exists(file)) return(NULL)
+    if (is.na(file) || !file.exists(file)) return(NULL)
     
-    out_base <- tools::file_path_sans_ext(basename(file))
+    out_base  <- tools::file_path_sans_ext(basename(file))
     dir.create(plots_dir, showWarnings = FALSE, recursive = TRUE)
     plot_file <- file.path(plots_dir, paste0(out_base, "_test_plot.png"))
     
-    # dl_model_candidate_paths() (util.R) picks .hdf5 or .pt to match the
-    # active backend (Keras/Linux vs PyTorch/Windows) - see its docs.
     mdl_candidates <- c(
       dl_model_candidate_paths("trained_models", out_base),
       dl_model_candidate_paths("../trained_models", out_base)
     )
     
-    # score_star() (in util.R) is the single shared implementation of
-    # "read, clean, triage-scan, predict-or-fall-back, detect, cache" - used
-    # identically here and by the standalone precompute_all_stars.R batch
-    # script, so the two can never silently disagree on a star's result.
-    # It has no Shiny dependency, so the fallback/triage state it returns is
-    # pushed into the reactiveVals here rather than inside score_star itself.
-    score <- score_star(
-      tbl_file = file, trained_model_paths = mdl_candidates,
-      db_conn = db_conn, plot_file = plot_file,
-      seq_len = seq_len, train_ratio = train_ratio, cadence_days = cadence_days
-    )
-    y_test <- score$y_test
-    y_pred <- score$y_pred
+    # Use per-star cache to skip model inference on zoom/tag-only re-renders
+    cache <- isolate(star_data_cache())
+    if (!is.null(cache[[kplr_id_val]])) {
+      score <- cache[[kplr_id_val]]
+    } else {
+      score <- score_star(
+        tbl_file = file, trained_model_paths = mdl_candidates,
+        db_conn = db_conn, plot_file = plot_file,
+        seq_len = seq_len, train_ratio = train_ratio, cadence_days = cadence_days
+      )
+      cache[[kplr_id_val]] <- score
+      star_data_cache(cache)
+    }
+    y_test   <- score$y_test
+    y_pred   <- score$y_pred
     test_vec <- score$test_vec
     model_fallback_state(score$fallback_reason)
     triage_state(score$triage)
     
-    # Anomaly mask for VIEW mode: reflects the user's saved tags (falling
-    # back to model-detected candidates when the user has none of their own)
-    idx_mask <- rep(FALSE, length(test_vec))
+    # Anomaly mask for VIEW mode (red dots at saved-tag / model-detected cadences)
+    idx_mask  <- rep(FALSE, length(test_vec))
     cur_saved <- isolate(saved_indices())
-    if(length(cur_saved$starts) > 0 && any(cur_saved$starts > 0)) {
-      for(j in seq_along(cur_saved$starts)) {
+    if (length(cur_saved$starts) > 0L && any(cur_saved$starts > 0L)) {
+      for (j in seq_along(cur_saved$starts)) {
         st <- cur_saved$starts[j]
         en <- min(cur_saved$ends[j], length(test_vec))
-        if(st > 0 && en >= st) idx_mask[st:en] <- TRUE
+        if (st > 0L && en >= st) idx_mask[st:en] <- TRUE
       }
     }
     
-    # Determine xlim and dynamic ylim for active zoom
-    xlim <- if(is.null(xlim_dep)) c(1, length(test_vec)) else xlim_dep
-    sub_indices <- max(1, xlim[1]):min(length(test_vec), xlim[2])
-    sub_flux <- test_vec[sub_indices]
-    
-    if(length(sub_flux) > 0 && any(is.finite(sub_flux))) {
-      fl_min <- min(sub_flux, na.rm = TRUE)
-      fl_max <- max(sub_flux, na.rm = TRUE)
+    xlim <- if (is.null(xlim_dep)) c(1L, length(test_vec)) else xlim_dep
+    sub_flux <- test_vec[max(1L, xlim[1]):min(length(test_vec), xlim[2])]
+    ylim <- if (length(sub_flux) > 0L && any(is.finite(sub_flux))) {
+      fl_min <- min(sub_flux, na.rm = TRUE); fl_max <- max(sub_flux, na.rm = TRUE)
       pad <- max(0.05 * (fl_max - fl_min), 0.001)
-      ylim <- c(fl_min - pad, fl_max + pad)
-    } else {
-      ylim <- NULL
-    }
+      c(fl_min - pad, fl_max + pad)
+    } else NULL
     
     title_str <- paste("Kepler Light Curve -", out_base,
-                       if(!is.null(xlim_dep)) sprintf("[Zoomed: %d - %d]", xlim[1], xlim[2]) else "",
-                       if(in_tag_mode) " [Manual Tagging Mode]" else "")
+      if (!is.null(xlim_dep)) sprintf("[Zoomed: %.1f\u2013%.1f d]",
+        (xlim[1]-1L)*cadence_days, (xlim[2]-1L)*cadence_days) else "",
+      if (in_tag_mode) " [Tagging Mode]" else "")
     
-    # Must match test_vec's flattening exactly (both go through
-    # flatten_chronological via score_star()/score$test_vec) or the
-    # predicted-baseline line would be plotted against the wrong points.
-    pred_vec <- flatten_chronological(y_pred)
+    pred_vec    <- flatten_chronological(y_pred)
     cur_windows <- isolate(tag_windows())
+    cur_labels  <- isolate(tag_labels())
     
-    build_light_curve_plotly(test_vec = test_vec, pred_vec = pred_vec,
-                              xlim = xlim, ylim = ylim, idx_mask = idx_mask,
-                              title_str = title_str,
-                              mode = if(in_tag_mode) "tag" else "view",
-                              tag_windows_list = cur_windows)
+    # In view mode load saved windows + labels for non-editable overlay
+    view_windows <- if (!in_tag_mode) indices_to_windows(isolate(saved_indices())) else list()
+    view_labels  <- if (!in_tag_mode && length(view_windows) > 0L) {
+      lbl_res <- tryCatch(
+        dbGetQuery(db_conn,
+          "SELECT start, label FROM user_star WHERE user_id = ? AND kepler_id = ? AND start > 0 ORDER BY start;",
+          params = list(isolate(user_info()$name), isolate(current_star_id()))),
+        error = function(e) data.frame(start = integer(0), label = character(0)))
+      if (nrow(lbl_res) > 0L) {
+        lv <- lbl_res$label
+        lv[is.na(lv) | !nzchar(lv)] <- "Transit"
+        as.list(lv)
+      } else rep(list("Transit"), length(view_windows))
+    } else list()
+    
+    build_light_curve_plotly(
+      test_vec = test_vec, pred_vec = pred_vec,
+      xlim = xlim, ylim = ylim, idx_mask = idx_mask,
+      title_str = title_str,
+      mode = if (in_tag_mode) "tag" else "view",
+      tag_windows_list = if (in_tag_mode) cur_windows else view_windows,
+      tag_labels_list  = if (in_tag_mode) cur_labels  else view_labels,
+      cadence_days = cadence_days
+    )
   })
   
   output$planet_page <- renderUI({
@@ -1447,15 +1654,23 @@ server = function(input, output, session) {
     if (!isTRUE(community_tags_visible())) return(NULL)
     tag_save_trigger()
     
-    id <- current_star_id()
+    id         <- current_star_id()
     human_sets <- get_star_human_tag_sets(db_conn, id)
-    model_set <- get_star_model_tag_set(db_conn, id)
-    n_human <- length(human_sets)
-    regions <- build_community_regions(human_sets)
+    model_set  <- get_star_model_tag_set(db_conn, id)
+    n_human    <- length(human_sets)
+    regions    <- build_community_regions(human_sets)
     
-    body <- if (nrow(regions) == 0) {
+    # Check if any user has flagged this star for discussion
+    flagged_users <- tryCatch(
+      dbGetQuery(db_conn,
+        "SELECT DISTINCT user_id FROM user_star WHERE kepler_id = ? AND flagged = 1;",
+        params = list(id)),
+      error = function(e) data.frame(user_id = character(0)))
+    any_flagged <- nrow(flagged_users) > 0L
+    
+    body <- if (nrow(regions) == 0L) {
       tags$p(style = "color:#777; font-style:italic; margin: 6px 0 0 0;",
-             if (n_human == 0) "No one has tagged this star yet \u2014 be the first!"
+             if (n_human == 0L) "No one has tagged this star yet \u2014 be the first!"
              else "Every tagger for this star marked \u201cno transit\u201d \u2014 no candidate windows to show.")
     } else {
       merged_model <- merge_windows(model_set)
@@ -1464,18 +1679,23 @@ server = function(input, output, session) {
       }, logical(1))
       regions <- regions[order(-regions$n_taggers, regions$start), ]
       
-      tags$table(class = "table table-striped table-condensed", style = "width:100%; font-size:0.85em; margin-top:8px;",
+      tags$table(class = "table table-striped table-condensed",
+                 style = "width:100%; font-size:0.85em; margin-top:8px;",
         tags$thead(tags$tr(
-          tags$th("Window (cadence)"), tags$th("Agreement"), tags$th("Tagged by"), tags$th("Matches model?")
+          tags$th("Window (days)"), tags$th("Agreement"), tags$th("Tagged by"), tags$th("Matches model?")
         )),
         tags$tbody(
           lapply(seq_len(nrow(regions)), function(i) {
             r <- regions[i, ]
+            d0 <- round((r$start - 1L) * cadence_days, 2)
+            d1 <- round((r$end   - 1L) * cadence_days, 2)
             tags$tr(
-              tags$td(sprintf("%d \u2013 %d", r$start, r$end)),
+              tags$td(title = sprintf("Cadence index %d\u2013%d", r$start, r$end),
+                      sprintf("%.2f\u2013%.2f d", d0, d1)),
               tags$td(sprintf("%d / %d", r$n_taggers, n_human)),
               tags$td(r$taggers),
-              tags$td(if (r$model_match) icon("check", style = "color:#16a34a;") else icon("minus", style = "color:#999;"))
+              tags$td(if (r$model_match) icon("check", style = "color:#16a34a;")
+                      else icon("minus", style = "color:#999;"))
             )
           })
         )
@@ -1483,10 +1703,16 @@ server = function(input, output, session) {
     }
     
     div(style = "border: 1px solid #ddd; border-radius: 6px; padding: 12px; margin-bottom: 15px; background-color: #fafafa;",
+      div(style = "display:flex; justify-content:space-between; align-items:baseline;",
         tags$b("Community Tags"),
-        tags$p(style = "margin: 6px 0 0 0; font-size: 0.85em; color: #777;",
-               sprintf("%d user%s tagged this star so far.", n_human, if (n_human == 1) "" else "s")),
-        body
+        if (any_flagged) tags$span(
+          style = "background:#fef3c7; border:1px solid #fbbf24; border-radius:10px; padding:2px 8px; font-size:0.8em; color:#92400e;",
+          "\u2691 Flagged by: ", paste(flagged_users$user_id, collapse = ", ")
+        ) else NULL
+      ),
+      tags$p(style = "margin: 6px 0 0 0; font-size: 0.85em; color: #777;",
+             sprintf("%d user%s tagged this star so far.", n_human, if (n_human == 1L) "" else "s")),
+      body
     )
   })
   
@@ -1495,79 +1721,147 @@ server = function(input, output, session) {
   })
   
   output$toolbar <- renderUI({
+    is_flagged <- isTRUE(star_flagged())
+    lbl_last   <- last_window_label()   # persists across re-renders
+    comm_lbl   <- if (isTRUE(community_tags_visible())) " Hide Community Tags" else " View Community Tags"
+
     if (isTRUE(tag_mode())) {
+      # ---- TAGGING MODE TOOLBAR ----
       div(style = "display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 15px;",
+
         bsButton("fix_brush", label = " Fix Brush as Window", icon = icon("thumbtack"), style = "primary"),
-        bsTooltip(id = "fix_brush", title = "Drag-select a range on the plot, then click here to fix it as a tagged window", placement = "top", trigger = "hover"),
+        bsTooltip(id = "fix_brush",
+          title = "Drag-select a range on the plot, then click here to fix it as a tagged window",
+          placement = "top", trigger = "hover"),
 
-        bsButton("undo_window", label = " Undo Last Window", icon = icon("history"), style = "info"),
-        bsTooltip(id = "undo_window", title = "Remove the most recently fixed window", placement = "top", trigger = "hover"),
+        # Label picker: choose the signal type for the NEXT window
+        div(style = "display:flex; align-items:center; gap:4px;",
+            tags$small(style = "color:#555; white-space:nowrap;", "Label:"),
+            selectInput("window_label", NULL,
+                        choices = c("Transit", "Sinusoidal", "Flare", "Odd-Even", "Uncertain"),
+                        selected = lbl_last, width = "130px")),
 
-        span(style = "margin-left: 10px; border-left: 2px solid #ddd; height: 32px; margin-right: 10px;"),
+        bsButton("undo_window", label = " Undo", icon = icon("undo"), style = "info"),
+        bsTooltip(id = "undo_window", title = "Remove the most recently fixed window",
+                  placement = "top", trigger = "hover"),
 
-        bsButton("zoom_in", label = " Zoom In (+)", icon = icon("plus"), style = "info"),
-        bsButton("zoom_out", label = " Zoom Out (-)", icon = icon("minus"), style = "info"),
-        bsButton("zoom_reset", label = " Reset Zoom", icon = icon("arrows-alt"), style = "default"),
+        span(style = "margin-left:8px; border-left:2px solid #ddd; height:32px; margin-right:8px;"),
 
-        span(style = "margin-left: 10px; border-left: 2px solid #ddd; height: 32px; margin-right: 10px;"),
+        bsButton("zoom_in",    label = " +", icon = icon("plus"),       style = "info"),
+        bsButton("zoom_out",   label = " \u2212", icon = icon("minus"), style = "info"),
+        bsButton("zoom_reset", label = " Reset", icon = icon("expand"), style = "default"),
+
+        span(style = "margin-left:8px; border-left:2px solid #ddd; height:32px; margin-right:8px;"),
 
         bsButton("confirm_tags", label = " Confirm Tags", icon = icon("check"), style = "success"),
-        bsTooltip(id = "confirm_tags", title = "Save all fixed windows to your tagged data", placement = "top", trigger = "hover"),
+        bsTooltip(id = "confirm_tags", title = "Save all fixed windows to your tagged data",
+                  placement = "top", trigger = "hover"),
 
         bsButton("cancel_tagging", label = " Cancel", icon = icon("times"), style = "danger"),
-        bsTooltip(id = "cancel_tagging", title = "Discard this tagging session without saving", placement = "top", trigger = "hover"),
+        bsTooltip(id = "cancel_tagging", title = "Discard this tagging session without saving",
+                  placement = "top", trigger = "hover"),
 
-        span(style = "margin-left: 10px; border-left: 2px solid #ddd; height: 32px; margin-right: 10px;"),
+        span(style = "margin-left:8px; border-left:2px solid #ddd; height:32px; margin-right:8px;"),
+
+        bsButton("flag_discussion",
+                 label = if (is_flagged) " Flagged \u2691" else " Flag \u2690",
+                 icon  = icon("flag"),
+                 style = if (is_flagged) "danger" else "default"),
+        bsTooltip(id = "flag_discussion",
+                  title = "Toggle flag for community discussion",
+                  placement = "top", trigger = "hover"),
+
+        span(style = "margin-left:8px; border-left:2px solid #ddd; height:32px; margin-right:8px;"),
 
         bsButton("verify_period", label = " Verify Period (BLS)", icon = icon("wave-square"), style = "default"),
-        bsTooltip(id = "verify_period", title = "Run a Box Least Squares search on the full light curve, using the fixed windows as a duration hint, to estimate period/duration/depth", placement = "top", trigger = "hover"),
+        bsTooltip(id = "verify_period",
+                  title = "Run Box Least Squares on the full light curve using the fixed windows as a duration hint",
+                  placement = "top", trigger = "hover"),
 
-        span(style = "margin-left: 10px; border-left: 2px solid #ddd; height: 32px; margin-right: 10px;"),
+        span(style = "margin-left:8px; border-left:2px solid #ddd; height:32px; margin-right:8px;"),
 
-        bsButton("toggle_community_tags", label = if (isTRUE(community_tags_visible())) " Hide Community Tags" else " View Community Tags", icon = icon("users"), style = "default"),
-        bsTooltip(id = "toggle_community_tags", title = "See how other users have tagged this star, aggregated by per-region agreement", placement = "top", trigger = "hover"),
+        bsButton("toggle_community_tags", label = comm_lbl, icon = icon("users"), style = "default"),
+        bsTooltip(id = "toggle_community_tags",
+                  title = "See how other users have tagged this star",
+                  placement = "top", trigger = "hover"),
 
-        div(style = "width: 100%; margin-top: 6px; font-size: 0.9em; color: #555;",
-            textOutput("tag_window_summary")
-        ),
-        div(style = "width: 100%; font-size: 0.85em; color: #888;",
-            "Drag an edge of a fixed (orange) window to resize it, or drag its body to move it. Drag on empty space to select a new range."
+        div(style = "width:100%; margin-top:6px; font-size:0.9em; color:#555;",
+            textOutput("tag_window_summary")),
+        div(style = "width:100%; font-size:0.82em; color:#888;",
+            "Colours: ",
+            tags$span(style="color:rgba(217,119,6,1);", "\u25a0 Transit "),
+            tags$span(style="color:rgba(109,40,217,1);", "\u25a0 Sinusoidal "),
+            tags$span(style="color:rgba(185,28,28,1);", "\u25a0 Flare "),
+            tags$span(style="color:rgba(13,148,136,1);", "\u25a0 Odd-Even "),
+            tags$span(style="color:rgba(107,114,128,1);", "\u25a0 Uncertain"),
+            br(),
+            "Drag an edge of a fixed window to resize it, or drag its body to move it. Drag on empty space to select a new range."
         )
       )
     } else {
+      # ---- VIEW MODE TOOLBAR ----
       div(style = "display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 15px;",
-        bsButton("zoom_brush", label = " Zoom to Selection", icon = icon("search-plus"), style = "primary"),
-        bsTooltip(id = "zoom_brush", title = "Zoom into the range highlighted with the drag-select", placement = "top", trigger = "hover"),
 
-        bsButton("zoom_in", label = " Zoom In (+)", icon = icon("plus"), style = "info"),
-        bsTooltip(id = "zoom_in", title = "Zoom in by 50%", placement = "top", trigger = "hover"),
+        # Primary PHT-style actions
+        bsButton("no_transit", label = " No Transit (Done)", icon = icon("check-circle"), style = "success"),
+        bsTooltip(id = "no_transit",
+                  title = "I see no transit \u2014 saves your review and auto-advances to the next star",
+                  placement = "top", trigger = "hover"),
 
-        bsButton("zoom_out", label = " Zoom Out (-)", icon = icon("minus"), style = "info"),
-        bsTooltip(id = "zoom_out", title = "Zoom out by 50%", placement = "top", trigger = "hover"),
+        bsButton("next_star", label = " Next Star", icon = icon("arrow-right"), style = "primary"),
+        bsTooltip(id = "next_star",
+                  title = "Jump to the bandit-recommended next star without saving",
+                  placement = "top", trigger = "hover"),
 
-        bsButton("zoom_reset", label = " Reset Zoom", icon = icon("arrows-alt"), style = "default"),
-        bsTooltip(id = "zoom_reset", title = "Reset zoom to full light curve", placement = "top", trigger = "hover"),
+        span(style = "margin-left:10px; border-left:2px solid #ddd; height:32px; margin-right:10px;"),
 
-        span(style = "margin-left: 15px; border-left: 2px solid #ddd; height: 32px; margin-right: 10px;"),
+        bsButton("zoom_brush", label = " Zoom to Selection", icon = icon("search-plus"), style = "default"),
+        bsTooltip(id = "zoom_brush", title = "Zoom into the drag-selected range",
+                  placement = "top", trigger = "hover"),
+        bsButton("zoom_in",    label = " +",      icon = icon("plus"),   style = "info"),
+        bsButton("zoom_out",   label = " \u2212", icon = icon("minus"),  style = "info"),
+        bsButton("zoom_reset", label = " Reset",  icon = icon("expand"), style = "default"),
 
-        bsButton("start_tagging", label = " Edit Tags", icon = icon("pencil-alt"), style = "warning"),
-        bsTooltip(id = "start_tagging", title = "Start a manual tagging session pre-loaded with your saved tags", placement = "top", trigger = "hover"),
+        span(style = "margin-left:10px; border-left:2px solid #ddd; height:32px; margin-right:10px;"),
+
+        bsButton("start_tagging", label = " Edit Tags",   icon = icon("pencil-alt"), style = "warning"),
+        bsTooltip(id = "start_tagging",
+                  title = "Start a manual tagging session pre-loaded with your saved tags",
+                  placement = "top", trigger = "hover"),
 
         bsButton("customize", label = " Start Blank", icon = icon("eraser"), style = "warning"),
-        bsTooltip(id = "customize", title = "Start a manual tagging session with a blank slate", placement = "top", trigger = "hover"),
+        bsTooltip(id = "customize",
+                  title = "Start a manual tagging session with a blank slate",
+                  placement = "top", trigger = "hover"),
 
-        bsButton("reset", label = "Reset Tags to Model", icon = icon("undo"), style = "danger"),
-        bsTooltip(id = "reset", title = "Remove saved tags and revert to model-detected candidates", placement = "top", trigger = "hover"),
+        bsButton("reset", label = "Reset to Model", icon = icon("undo"), style = "danger"),
+        bsTooltip(id = "reset",
+                  title = "Remove saved tags and revert to model-detected candidates",
+                  placement = "top", trigger = "hover"),
 
-        span(style = "margin-left: 15px; border-left: 2px solid #ddd; height: 32px; margin-right: 10px;"),
+        span(style = "margin-left:10px; border-left:2px solid #ddd; height:32px; margin-right:10px;"),
+
+        bsButton("flag_discussion",
+                 label = if (is_flagged) " Flagged \u2691" else " Flag \u2690",
+                 icon  = icon("flag"),
+                 style = if (is_flagged) "danger" else "default"),
+        bsTooltip(id = "flag_discussion",
+                  title = "Toggle flag for community discussion",
+                  placement = "top", trigger = "hover"),
+
+        span(style = "margin-left:10px; border-left:2px solid #ddd; height:32px; margin-right:10px;"),
 
         bsButton("verify_period", label = " Verify Period (BLS)", icon = icon("wave-square"), style = "default"),
-        bsTooltip(id = "verify_period", title = "Run a Box Least Squares search on the full light curve, using the current tagged windows as a duration hint, to estimate period/duration/depth", placement = "top", trigger = "hover"),
+        bsTooltip(id = "verify_period",
+                  title = "Run Box Least Squares on the full light curve using the current tagged windows as a duration hint",
+                  placement = "top", trigger = "hover"),
 
-        span(style = "margin-left: 15px; border-left: 2px solid #ddd; height: 32px; margin-right: 10px;"),
+        span(style = "margin-left:10px; border-left:2px solid #ddd; height:32px; margin-right:10px;"),
 
-        bsButton("toggle_community_tags", label = if (isTRUE(community_tags_visible())) " Hide Community Tags" else " View Community Tags", icon = icon("users"), style = "default"),
-        bsTooltip(id = "toggle_community_tags", title = "See how other users have tagged this star, aggregated by per-region agreement", placement = "top", trigger = "hover")
+        bsButton("toggle_community_tags", label = comm_lbl, icon = icon("users"), style = "default"),
+        bsTooltip(id = "toggle_community_tags",
+                  title = "See how other users have tagged this star",
+                  placement = "top", trigger = "hover")
       )
     }
   })
