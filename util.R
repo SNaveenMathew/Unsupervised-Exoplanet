@@ -66,10 +66,10 @@ read_kepler_table <- function(file) {
 #'
 #' @param df Dataframe from read_kepler_table
 #' @param max_gap_days Maximum time gap before splitting into a new continuous chunk (default: 0.5 days)
-#' @param flare_sigma Sigma threshold for positive flare clipping (default: 3.0)
+#' @param flare_sigma Sigma threshold for positive flare clipping (default: 5.0)
 #' @param detrend_window Window size in cadences for running median detrending (default: 49)
 #' @return data.frame with cleaned, baseline-flattened flux and chunk IDs
-clean_light_curve <- function(df, max_gap_days = 0.5, flare_sigma = 3.0, detrend_window = 49) {
+clean_light_curve <- function(df, max_gap_days = 0.5, flare_sigma = 5.0, detrend_window = 49) {
   if(nrow(df) == 0) return(df)
   
   # 1. Sort by time
