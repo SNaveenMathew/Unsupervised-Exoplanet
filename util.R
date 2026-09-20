@@ -1036,6 +1036,12 @@ score_star <- function(tbl_file, trained_model_paths, db_conn = NULL, plot_file 
 #' precompute_all_stars.R) AND by pipeline.R's training loop (for both
 #' train_idx and test_idx), so the two can never silently disagree.
 #'
+#' Every row written by the model includes the same `label` and
+#' `classified_at` columns used by human tags in `user_star`, so the two
+#' sources are structurally identical. Model rows are distinguished from
+#' human rows purely by *which table* they land in (`test_idx`/`train_idx`
+#' vs `user_star`), not by schema differences.
+#'
 #' A star with genuinely zero detected candidates still gets ONE row
 #' written (start = 0, end = 0 - the same "nothing found" placeholder
 #' convention app.Rmd already uses for an explicit "no transit" human tag)
@@ -1059,9 +1065,14 @@ score_star <- function(tbl_file, trained_model_paths, db_conn = NULL, plot_file 
 #'   - see its docs. Callers using overlapping windows should pass
 #'   seq_len - stride so redundant re-detections of the same physical
 #'   event collapse into one candidate.
+#' @param label Classification label written to every row. Defaults to
+#'   "model_detection" for autoencoder-detected windows; callers may pass
+#'   a different string (e.g. "model_train_detection") if they need to
+#'   distinguish train vs test detections beyond the table_name.
 #' @return list(candidates, from_cache)
 record_candidates <- function(y_pred, y, star_id, db_conn = NULL, table_name = "test_idx",
-                               plot_file = NULL, force = FALSE, merge_gap = 0) {
+                               plot_file = NULL, force = FALSE, merge_gap = 0,
+                               label = "model_detection") {
   det_res <- detect_transit_candidates(y_pred = y_pred, y = y, merge_gap = merge_gap)
   candidates <- det_res$candidates
   
@@ -1083,12 +1094,25 @@ record_candidates <- function(y_pred, y, star_id, db_conn = NULL, table_name = "
       if (force && existing > 0) {
         dbExecute(db_conn, sprintf("DELETE FROM %s WHERE id = ?;", table_name), params = list(star_id))
       }
+      ts <- format(Sys.time(), "%Y-%m-%dT%H:%M:%S")
       cand_out <- if (nrow(candidates) > 0) {
         out <- candidates
-        out$id <- star_id
-        out[, c("id", "start", "end")]
+        out$id    <- star_id
+        out$label <- label
+        out$classified_at <- ts
+        out[, c("id", "start", "end", "label", "classified_at")]
       } else {
-        data.frame(id = star_id, start = 0, end = 0)  # placeholder: "scored, nothing found"
+        # placeholder: "scored, nothing found" — same (0,0) convention as user_star
+        data.frame(id = star_id, start = 0L, end = 0L,
+                   label = label, classified_at = ts, stringsAsFactors = FALSE)
+      }
+      # Ensure new columns exist in the target table. ALTER TABLE ADD COLUMN errors
+      # if the column already exists; we swallow that so re-runs are idempotent.
+      for (.col_def in c("label TEXT", "classified_at TEXT")) {
+        tryCatch(
+          dbExecute(db_conn, sprintf("ALTER TABLE \"%s\" ADD COLUMN %s;", table_name, .col_def)),
+          error = function(e) NULL
+        )
       }
       dbWriteTable(db_conn, table_name, cand_out, append = TRUE)
     }
